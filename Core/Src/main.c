@@ -22,7 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "LCD_Driver.h"
-#include <stdio.h>
+#include "stdio.h"
+#include "tmpsensor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,19 +43,38 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
 
 SPI_HandleTypeDef hspi1;
 
+TIM_HandleTypeDef htim3;
+
 /* USER CODE BEGIN PV */
-uint32_t adc_value;
-float temperature;
+
+//uint32_t adc_value;
+//float temperature;
+
+//Khang's code start
+typedef struct AdcValues{
+uint16_t Raw[2]; /* Raw values from ADC */
+double IntSensTmp; /* Temperature */
+}adcval_t;
+adcval_t Adc;
+typedef struct Flags
+{
+uint8_t ADCCMPLT;
+}flag_t;
+flag_t Flg = {0, };
+//Khang's code end
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 float Read_Temperature(void);
 /* USER CODE END PFP */
@@ -93,9 +113,10 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_SPI1_Init();
-
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   lcd_init();
   //lcd_clear_screen(WHITE);
@@ -106,48 +127,72 @@ int main(void)
 
   lcd_fill_rect(10, 55, 200, 30, WHITE);
   lcd_display_string(20, 64, (uint8_t *)"Internal Temperature:", FONT_1206, BLACK);
+  //Khang's code start
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)Adc.Raw, 2);
+  HAL_TIM_Base_Start(&htim3); /* This timer starts ADC conversion */
+  //Khang's code end
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
+	  //Khang's code start
+      char buf[32];
+      char old_buf[32];
+      int temp_int;
+      int temp_frac;
+
+	if (Flg.ADCCMPLT) /* Conversion completed, do calculations */
+	{
+	/* Temperature Sensor ADC-value, Reference Voltage ADC-value (if use) */
+	Adc.IntSensTmp = TMPSENSOR_getTemperature(Adc.Raw[1], Adc.Raw[0]);
+    temp_int = (int)Adc.IntSensTmp;
+    temp_frac = (int)((Adc.IntSensTmp - temp_int) * 100.0f);
+	sprintf(buf, "%d.%02d C", temp_int, temp_frac);
+    lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, BLACK);
+    HAL_Delay(100);
+    lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, WHITE);
+	Flg.ADCCMPLT = 0; /* Nullify flag */
+	//Khang's code end
+	}
     /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-    static int last_temp_int = -1000;
-    static int last_temp_frac = -1;
-
-    char buf[32];
-    char old_buf[32];
-    int temp_int;
-    int temp_frac;
-
-    temperature = Read_Temperature();
-
-    temp_int = (int)temperature;
-    temp_frac = (int)((temperature - temp_int) * 100.0f);
-    if (temp_frac < 0)
-      temp_frac = -temp_frac;
-
-    if (temp_int != last_temp_int || temp_frac != last_temp_frac)
-    {
-      if (last_temp_int != -1000)
-      {
-        sprintf(old_buf, "%d.%02d C", last_temp_int, last_temp_frac);
-        lcd_display_string(150, 64, (uint8_t *)old_buf, FONT_1206, WHITE);
-      }
-
-      sprintf(buf, "%d.%02d C", temp_int, temp_frac);
-      lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, BLACK);
-
-      last_temp_int = temp_int;
-      last_temp_frac = temp_frac;
-    }
-
-    HAL_Delay(500);
-    /* USER CODE END 3 */
   }
+    /* USER CODE BEGIN 3 */
+//    static int last_temp_int = -1000;
+//    static int last_temp_frac = -1;
+//
+//    char buf[32];
+//    char old_buf[32];
+//    int temp_int;
+//    int temp_frac;
+//
+//    temperature = Read_Temperature();
+//
+//    temp_int = (int)temperature;
+//    temp_frac = (int)((temperature - temp_int) * 100.0f);
+//    if (temp_frac < 0)
+//      temp_frac = -temp_frac;
+//
+//    if (temp_int != last_temp_int || temp_frac != last_temp_frac)
+//    {
+//      if (last_temp_int != -1000)
+//      {
+//        sprintf(old_buf, "%d.%02d C", last_temp_int, last_temp_frac);
+//        lcd_display_string(150, 64, (uint8_t *)old_buf, FONT_1206, WHITE);
+//      }
+//
+//      sprintf(buf, "%d.%02d C", temp_int, temp_frac);
+//      lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, BLACK);
+//
+//      last_temp_int = temp_int;
+//      last_temp_frac = temp_frac;
+//    }
+//
+//    HAL_Delay(500);
+
+  /* USER CODE END 3 */
 }
 
 /**
@@ -221,11 +266,11 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 2;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
@@ -234,7 +279,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
+  sConfig.Channel = ADC_CHANNEL_VREFINT;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -244,7 +289,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_VREFINT;
+  sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -291,6 +336,67 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 840-1;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 10000-1;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
 
@@ -358,6 +464,16 @@ float Read_Temperature(void)
 
     return temperature;
 }
+//Khang's code start
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+    if(hadc->Instance == ADC1) /* Check if the interrupt comes from ACD1 */
+    {
+    /* Set flag to true */
+    Flg.ADCCMPLT = 255;
+    }
+}
+//Khang's code end
 /* USER CODE END 4 */
 
 /**
