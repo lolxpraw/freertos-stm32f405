@@ -18,12 +18,15 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
 #include "LCD_Driver.h"
 #include "stdio.h"
 #include "tmpsensor.h"
+#include "touch.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,7 +36,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define WAV_HEADER_SIZE        44
+#define AUDIO_BUFFER_SAMPLES   4096
+#define AUDIO_HALF_SAMPLES     (AUDIO_BUFFER_SAMPLES / 2)
+#define AUDIO_SAMPLE_RATE      16000
 
+/* Audio state machine */
+#define AUDIO_STOPPED   0
+#define AUDIO_PLAYING   1
+#define AUDIO_PAUSED    2
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -45,12 +56,36 @@
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+DAC_HandleTypeDef hdac;
+DMA_HandleTypeDef hdma_dac1;
+
+SD_HandleTypeDef hsd;
+
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim6;
+
+UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+FIL myFile;
+FIL musicFile;
 
+uint16_t dacBuffer[AUDIO_BUFFER_SAMPLES];
+uint8_t wavTemp[AUDIO_HALF_SAMPLES];
+uint8_t wavHeader[WAV_HEADER_SIZE];
+
+volatile uint8_t sd_ready = 0;
+volatile uint8_t audio_state = AUDIO_STOPPED;
+volatile uint8_t audio_half_req = 0;
+volatile uint8_t audio_full_req = 0;
+volatile uint8_t music_file_opened = 0;
+volatile uint8_t audio_finished = 0;        /* set khi bai nhac chay het tu dong */
+volatile UINT wavDataOffset = WAV_HEADER_SIZE;
+
+volatile uint32_t audio_total_samples = 0;
+volatile uint32_t audio_played_samples = 0;
 //uint32_t adc_value;
 //float temperature;
 
@@ -75,13 +110,322 @@ static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_SDIO_SD_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_DAC_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 float Read_Temperature(void);
+uint8_t Audio_Start(void);
+void Audio_Pause(void);
+void Audio_Resume(void);
+void Audio_Reset(void);
+void Audio_Service(void);
+void Audio_FillHalf(uint16_t startIndex);
+uint16_t WAV_ReadU16(const uint8_t *p);
+uint32_t WAV_ReadU32(const uint8_t *p);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint16_t WAV_ReadU16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
 
+uint32_t WAV_ReadU32(const uint8_t *p)
+{
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+void Audio_FillHalf(uint16_t startIndex)
+{
+    UINT br = 0;
+    UINT total = 0;
+    uint16_t i;
+
+    while (total < AUDIO_HALF_SAMPLES)
+    {
+        if (f_read(&musicFile, &wavTemp[total], AUDIO_HALF_SAMPLES - total, &br) != FR_OK)
+        {
+            br = 0;
+        }
+
+        if (br == 0)
+        {
+            /* EOF -> fill phan con lai bang silence (0x80 cho 8-bit unsigned) */
+            for (UINT k = total; k < AUDIO_HALF_SAMPLES; k++)
+                wavTemp[k] = 0x80;
+            break;
+        }
+
+        total += br;
+    }
+
+    for (i = 0; i < AUDIO_HALF_SAMPLES; i++)
+    {
+        dacBuffer[startIndex + i] = ((uint16_t)wavTemp[i]) << 4;   // 8-bit unsigned -> 12-bit DAC
+    }
+}
+
+uint8_t Audio_Start(void)
+{
+    UINT br;
+    UINT scanRead;
+    FRESULT fres;
+    char dbg[40];
+    uint16_t i;
+    uint8_t scanBuf[256];
+
+    if (audio_state != AUDIO_STOPPED)
+        return 1;
+
+    if (!sd_ready)
+    {
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)"ERR: SD not ready", FONT_1206, RED);
+        return 0;
+    }
+
+    fres = f_open(&musicFile, "music.wav", FA_READ);
+    if (fres != FR_OK)
+    {
+        sprintf(dbg, "ERR open: %d", fres);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
+        return 0;
+    }
+
+    music_file_opened = 1;
+
+    fres = f_read(&musicFile, scanBuf, sizeof(scanBuf), &scanRead);
+    if (fres != FR_OK || scanRead < 44)
+    {
+        sprintf(dbg, "ERR read: %d/%u", fres, scanRead);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (memcmp(&scanBuf[0], "RIFF", 4) != 0)
+    {
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)"ERR: no RIFF", FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (memcmp(&scanBuf[8], "WAVE", 4) != 0)
+    {
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)"ERR: no WAVE", FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (memcmp(&scanBuf[12], "fmt ", 4) != 0)
+    {
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)"ERR: no fmt", FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (WAV_ReadU16(&scanBuf[20]) != 1)
+    {
+        sprintf(dbg, "ERR fmt=%u", WAV_ReadU16(&scanBuf[20]));
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (WAV_ReadU16(&scanBuf[22]) != 1)
+    {
+        sprintf(dbg, "ERR ch=%u", WAV_ReadU16(&scanBuf[22]));
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (WAV_ReadU32(&scanBuf[24]) != 16000)
+    {
+        sprintf(dbg, "ERR rate=%lu", WAV_ReadU32(&scanBuf[24]));
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (WAV_ReadU16(&scanBuf[34]) != 8)
+    {
+        sprintf(dbg, "ERR bits=%u", WAV_ReadU16(&scanBuf[34]));
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    wavDataOffset = 0;
+    for (i = 12; (i + 8) < scanRead; i++)
+    {
+        if (memcmp(&scanBuf[i], "data", 4) == 0)
+        {
+            wavDataOffset = i + 8;   // sau "data" + size
+            break;
+        }
+    }
+
+    if (wavDataOffset == 0)
+    {
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)"ERR: no data", FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    if (f_lseek(&musicFile, wavDataOffset) != FR_OK)
+    {
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_display_string(20, 190, (uint8_t *)"ERR: seek data", FONT_1206, RED);
+        f_close(&musicFile);
+        music_file_opened = 0;
+        return 0;
+    }
+
+    /* Tinh tong so samples = file_size - data_offset (8-bit mono -> 1 byte/sample) */
+    uint32_t file_size = f_size(&musicFile);
+    if (file_size > wavDataOffset)
+        audio_total_samples = file_size - wavDataOffset;
+    else
+        audio_total_samples = 0;
+    audio_played_samples = 0;
+    audio_finished = 0;
+
+    Audio_FillHalf(0);
+    Audio_FillHalf(AUDIO_HALF_SAMPLES);
+
+    audio_half_req = 0;
+    audio_full_req = 0;
+
+    HAL_TIM_Base_Start(&htim6);
+    HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
+
+    audio_state = AUDIO_PLAYING;
+    return 1;
+}
+
+/* Pause: giu file mo + giu vi tri + giu counter */
+void Audio_Pause(void)
+{
+    if (audio_state != AUDIO_PLAYING)
+        return;
+
+    HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+    HAL_TIM_Base_Stop(&htim6);
+
+    audio_state = AUDIO_PAUSED;
+}
+
+/* Resume: nap lai buffer tu vi tri file hien tai roi chay tiep */
+void Audio_Resume(void)
+{
+    if (audio_state != AUDIO_PAUSED)
+        return;
+
+    /* Nap lai buffer de tranh nghe lai doan cu trong dacBuffer */
+    Audio_FillHalf(0);
+    Audio_FillHalf(AUDIO_HALF_SAMPLES);
+
+    audio_half_req = 0;
+    audio_full_req = 0;
+
+    HAL_TIM_Base_Start(&htim6);
+    HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
+
+    audio_state = AUDIO_PLAYING;
+}
+
+/* Reset: dong file + reset counter ve dau */
+void Audio_Reset(void)
+{
+    if (audio_state == AUDIO_PLAYING)
+    {
+        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop(&htim6);
+    }
+
+    if (music_file_opened)
+    {
+        f_close(&musicFile);
+        music_file_opened = 0;
+    }
+
+    audio_state = AUDIO_STOPPED;
+    audio_played_samples = 0;
+    audio_total_samples = 0;
+    audio_finished = 0;
+}
+
+void Audio_Service(void)
+{
+    if (audio_state != AUDIO_PLAYING)
+        return;
+
+    if (audio_half_req)
+    {
+        audio_half_req = 0;
+        audio_played_samples += AUDIO_HALF_SAMPLES;
+        Audio_FillHalf(0);
+    }
+
+    if (audio_full_req)
+    {
+        audio_full_req = 0;
+        audio_played_samples += AUDIO_HALF_SAMPLES;
+        Audio_FillHalf(AUDIO_HALF_SAMPLES);
+    }
+
+    /* Het bai -> tu dong dung hoan toan */
+    if (audio_total_samples > 0 && audio_played_samples >= audio_total_samples)
+    {
+        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop(&htim6);
+
+        if (music_file_opened)
+        {
+            f_close(&musicFile);
+            music_file_opened = 0;
+        }
+
+        audio_state = AUDIO_STOPPED;
+        audio_finished = 1;   /* bao main loop cap nhat UI */
+    }
+}
+
+void HAL_DAC_ConvHalfCpltCallbackCh1(DAC_HandleTypeDef *hdac)
+{
+    audio_half_req = 1;
+}
+
+void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac)
+{
+    audio_full_req = 1;
+}
 /* USER CODE END 0 */
 
 /**
@@ -117,81 +461,264 @@ int main(void)
   MX_ADC1_Init();
   MX_SPI1_Init();
   MX_TIM3_Init();
+  MX_SDIO_SD_Init();
+  MX_USART1_UART_Init();
+  MX_FATFS_Init();
+  MX_DAC_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
-  lcd_init();
-  //lcd_clear_screen(WHITE);
-  lcd_clear_screen(BLUE);
+  FRESULT res;
+  UINT bytesRead;
+  char buffer[128];
+  HAL_StatusTypeDef hsd_res;
 
-  lcd_fill_rect(10, 11, 90, 30, WHITE);
+  sd_ready = 0;
+
+  lcd_init();
+  tp_init();
+
+  lcd_clear_screen(0x2B4F);
+
+  /* Title */
+  lcd_fill_rect(10, 10, 100, 35, WHITE);
   lcd_display_string(22, 20, (uint8_t *)"[Nhom 09]", FONT_1608, BLACK);
 
-  lcd_fill_rect(10, 55, 200, 30, WHITE);
+  /* Internal Temp */
+  lcd_fill_rect(10, 55, 220, 30, WHITE);
   lcd_display_string(20, 64, (uint8_t *)"Internal Temperature:", FONT_1206, BLACK);
-  //Khang's code start
+
+  /* Nut Play/Pause */
+  lcd_fill_rect(10, 90, 220, 80, WHITE);
+  lcd_draw_line(50, 105, 90, 130, BLACK);
+  lcd_draw_line(90, 130, 50, 155, BLACK);
+  lcd_draw_line(50, 155, 50, 105, BLACK);
+  lcd_fill_rect(130, 105, 18, 50, BLACK);
+  lcd_fill_rect(165, 105, 18, 50, BLACK);
+
+  /* Data */
+  lcd_fill_rect(10, 180, 220, 130, WHITE);
+  lcd_display_string(20, 190, (uint8_t *)"Data...", FONT_1206, BLACK);
+
+  /* Khoi tao SD */
+  hsd_res = HAL_SD_Init(&hsd);
+  if (hsd_res != HAL_OK)
+  {
+      lcd_display_string(20, 210, (uint8_t*)"HAL_SD_Init FAIL", FONT_1206, RED);
+  }
+  else
+  {
+      /* chuyen tu 1-bit sang 4-bit */
+      hsd_res = HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B);
+
+      if (hsd_res != HAL_OK)
+      {
+          lcd_display_string(20, 210, (uint8_t*)"4-bit config FAIL", FONT_1206, RED);
+      }
+      else
+      {
+          HAL_Delay(20);
+          res = f_mount(&SDFatFS, SDPath, 1);
+
+          if (res == FR_OK)
+          {
+              sd_ready = 1;
+              lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
+
+              /* doc test.txt de kiem tra */
+              res = f_open(&myFile, "test.txt", FA_READ);
+              if (res == FR_OK)
+              {
+                  f_read(&myFile, buffer, sizeof(buffer) - 1, &bytesRead);
+                  buffer[bytesRead] = '\0';
+
+                  lcd_fill_rect(20, 230, 200, 20, WHITE);
+                  lcd_display_string(20, 230, (uint8_t*)buffer, FONT_1206, BLACK);
+
+                  f_close(&myFile);
+              }
+              else
+              {
+                  lcd_fill_rect(20, 230, 200, 20, WHITE);
+                  lcd_display_string(20, 230, (uint8_t*)"test.txt FAIL", FONT_1206, RED);
+              }
+
+              /* kiem tra co music.wav khong */
+              res = f_open(&musicFile, "music.wav", FA_READ);
+              if (res == FR_OK)
+              {
+                  f_close(&musicFile);
+                  lcd_fill_rect(20, 250, 200, 20, WHITE);
+                  lcd_display_string(20, 250, (uint8_t*)"music.wav READY", FONT_1206, GREEN);
+              }
+              else
+              {
+                  lcd_fill_rect(20, 250, 200, 20, WHITE);
+                  lcd_display_string(20, 250, (uint8_t*)"music.wav FAIL", FONT_1206, RED);
+              }
+          }
+          else
+          {
+              char msg[32];
+              sprintf(msg, "Mount FAIL: %d", res);
+              lcd_display_string(20, 210, (uint8_t*)msg, FONT_1206, RED);
+          }
+      }
+  }
+
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)Adc.Raw, 2);
-  HAL_TIM_Base_Start(&htim3); /* This timer starts ADC conversion */
-  //Khang's code end
+  HAL_TIM_Base_Start(&htim3);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  uint32_t last_temp_update = 0;
+  uint32_t last_time_update = 0;
+  char last_time_str[16] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
+  char last_temp_str[16] = "       ";         /* 7 spaces:  "XX.XX C" */
+
+  const int CHAR_W = 6;   /* FONT_1206: rong 6, cao 12 */
+  const int CHAR_H = 12;
+
   while (1)
   {
+      Audio_Service();
 
-	  //Khang's code start
-      char buf[32];
-      char old_buf[32];
-      int temp_int;
-      int temp_frac;
+      /* --- XU LY HET BAI TU DONG --- */
+      if (audio_finished)
+      {
+          audio_finished = 0;
+          lcd_fill_rect(15, 185, 200, 25, WHITE);
+          lcd_display_string(20, 190, (uint8_t *)"Nhac: HET BAI", FONT_1206, BLACK);
+          lcd_fill_rect(15, 273, 200, 15, WHITE);
+          memset(last_time_str, ' ', 13);
+          last_time_str[13] = '\0';
+      }
 
-	if (Flg.ADCCMPLT) /* Conversion completed, do calculations */
-	{
-	/* Temperature Sensor ADC-value, Reference Voltage ADC-value (if use) */
-	Adc.IntSensTmp = TMPSENSOR_getTemperature(Adc.Raw[1], Adc.Raw[0]);
-    temp_int = (int)Adc.IntSensTmp;
-    temp_frac = (int)((Adc.IntSensTmp - temp_int) * 100.0f);
-	sprintf(buf, "%d.%02d C", temp_int, temp_frac);
-    lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, BLACK);
-    HAL_Delay(100);
-    lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, WHITE);
-	Flg.ADCCMPLT = 0; /* Nullify flag */
-	//Khang's code end
-	}
-    /* USER CODE END WHILE */
+      /* --- HIEN THI THOI GIAN BAI NHAC (muot) --- */
+      if (audio_state == AUDIO_PLAYING && audio_total_samples > 0 &&
+          HAL_GetTick() - last_time_update > 200)
+      {
+          last_time_update = HAL_GetTick();
+
+          uint32_t played = audio_played_samples;
+          uint32_t total  = audio_total_samples;
+          if (played > total) played = total;
+          uint32_t cur_s = played / AUDIO_SAMPLE_RATE;
+          uint32_t tot_s = total / AUDIO_SAMPLE_RATE;
+
+          char new_time_str[16];
+          sprintf(new_time_str, "%02lu:%02lu / %02lu:%02lu",
+                  (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
+                  (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
+
+          const int T_X = 20;
+          const int T_Y = 275;
+
+          for (int i = 0; new_time_str[i] != '\0' && i < 15; i++)
+          {
+              if (last_time_str[i] != new_time_str[i])
+              {
+                  lcd_fill_rect(T_X + i * CHAR_W, T_Y, CHAR_W, CHAR_H, WHITE);
+                  char tmp[2] = { new_time_str[i], '\0' };
+                  lcd_display_string(T_X + i * CHAR_W, T_Y,
+                                     (uint8_t *)tmp, FONT_1206, BLACK);
+              }
+          }
+          strcpy(last_time_str, new_time_str);
+      }
+
+      /* --- CAP NHAT NHIET DO (muot, khong nhay) --- */
+      if (Flg.ADCCMPLT)
+      {
+          if (HAL_GetTick() - last_temp_update > ((audio_state == AUDIO_PLAYING) ? 2000 : 1000))
+          {
+              int temp_int, temp_frac;
+
+              Adc.IntSensTmp = TMPSENSOR_getTemperature(Adc.Raw[1], Adc.Raw[0]);
+              temp_int = (int)Adc.IntSensTmp;
+              temp_frac = (int)((Adc.IntSensTmp - temp_int) * 100.0f);
+              if (temp_frac < 0) temp_frac = -temp_frac;
+
+              char new_temp_str[16];
+              sprintf(new_temp_str, "%2d.%02d C", temp_int, temp_frac);
+
+              const int TMP_X = 155;
+              const int TMP_Y = 64;
+
+              for (int i = 0; new_temp_str[i] != '\0' && i < 15; i++)
+              {
+                  if (last_temp_str[i] != new_temp_str[i])
+                  {
+                      lcd_fill_rect(TMP_X + i * CHAR_W, TMP_Y, CHAR_W, CHAR_H, WHITE);
+                      char tmp[2] = { new_temp_str[i], '\0' };
+                      lcd_display_string(TMP_X + i * CHAR_W, TMP_Y,
+                                         (uint8_t *)tmp, FONT_1206, BLACK);
+                  }
+              }
+              strcpy(last_temp_str, new_temp_str);
+
+              last_temp_update = HAL_GetTick();
+          }
+          Flg.ADCCMPLT = 0;
+      }
+
+      /* --- XU LY CAM UNG --- */
+      uint16_t raw_x = 0;
+      uint16_t raw_y = 0;
+
+      if (Get_Touch_XY(&raw_x, &raw_y))
+      {
+          /* Khung nut Play/Pause */
+          if (raw_x >= 1900 && raw_x <= 2700 && raw_y >= 1000 && raw_y <= 2900)
+          {
+              if (raw_y >= 1900)   /* PLAY */
+              {
+                  if (audio_state == AUDIO_STOPPED)
+                  {
+                      /* Bat dau tu dau */
+                      lcd_fill_rect(15, 185, 200, 25, WHITE);
+                      if (Audio_Start())
+                      {
+                          lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
+                      }
+                  }
+                  else if (audio_state == AUDIO_PAUSED)
+                  {
+                      /* Tiep tuc tu vi tri pause */
+                      Audio_Resume();
+                      lcd_fill_rect(15, 185, 200, 25, WHITE);
+                      lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
+                  }
+                  HAL_Delay(300);
+              }
+              else                  /* PAUSE */
+              {
+                  if (audio_state == AUDIO_PLAYING)
+                  {
+                      /* Pause lan dau: tam dung, giu vi tri */
+                      Audio_Pause();
+                      lcd_fill_rect(15, 185, 200, 25, WHITE);
+                      lcd_display_string(20, 190, (uint8_t *)"Nhac: PAUSED", FONT_1206, BLACK);
+                  }
+                  else if (audio_state == AUDIO_PAUSED)
+                  {
+                      /* Pause lan 2: reset ve dau, lan play sau chay lai tu dau */
+                      Audio_Reset();
+                      lcd_fill_rect(15, 185, 200, 25, WHITE);
+                      lcd_display_string(20, 190, (uint8_t *)"Nhac: STOPPED", FONT_1206, BLACK);
+                      lcd_fill_rect(15, 273, 200, 15, WHITE);
+                      memset(last_time_str, ' ', 13);
+                      last_time_str[13] = '\0';
+                  }
+                  HAL_Delay(300);
+              }
+          }
+      }
   }
-    /* USER CODE BEGIN 3 */
-//    static int last_temp_int = -1000;
-//    static int last_temp_frac = -1;
-//
-//    char buf[32];
-//    char old_buf[32];
-//    int temp_int;
-//    int temp_frac;
-//
-//    temperature = Read_Temperature();
-//
-//    temp_int = (int)temperature;
-//    temp_frac = (int)((temperature - temp_int) * 100.0f);
-//    if (temp_frac < 0)
-//      temp_frac = -temp_frac;
-//
-//    if (temp_int != last_temp_int || temp_frac != last_temp_frac)
-//    {
-//      if (last_temp_int != -1000)
-//      {
-//        sprintf(old_buf, "%d.%02d C", last_temp_int, last_temp_frac);
-//        lcd_display_string(150, 64, (uint8_t *)old_buf, FONT_1206, WHITE);
-//      }
-//
-//      sprintf(buf, "%d.%02d C", temp_int, temp_frac);
-//      lcd_display_string(150, 64, (uint8_t *)buf, FONT_1206, BLACK);
-//
-//      last_temp_int = temp_int;
-//      last_temp_frac = temp_frac;
-//    }
-//
-//    HAL_Delay(500);
 
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
 }
 
@@ -302,6 +829,74 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief DAC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_DAC_Init(void)
+{
+
+  /* USER CODE BEGIN DAC_Init 0 */
+
+  /* USER CODE END DAC_Init 0 */
+
+  DAC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN DAC_Init 1 */
+
+  /* USER CODE END DAC_Init 1 */
+
+  /** DAC Initialization
+  */
+  hdac.Instance = DAC;
+  if (HAL_DAC_Init(&hdac) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** DAC channel OUT1 config
+  */
+  sConfig.DAC_Trigger = DAC_TRIGGER_T6_TRGO;
+  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN DAC_Init 2 */
+
+  /* USER CODE END DAC_Init 2 */
+
+}
+
+/**
+  * @brief SDIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SDIO_SD_Init(void)
+{
+
+  /* USER CODE BEGIN SDIO_Init 0 */
+
+  /* USER CODE END SDIO_Init 0 */
+
+  /* USER CODE BEGIN SDIO_Init 1 */
+
+  /* USER CODE END SDIO_Init 1 */
+  hsd.Instance = SDIO;
+  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
+  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
+  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
+  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
+  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
+  hsd.Init.ClockDiv = 118;
+  /* USER CODE BEGIN SDIO_Init 2 */
+
+  /* USER CODE END SDIO_Init 2 */
+
+}
+
+/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -385,6 +980,77 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 41;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 124;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -392,8 +1058,12 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
@@ -415,6 +1085,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LCD_RST_Pin|LCD_BL_Pin|LCD_CS_Pin|LCD_DC_Pin

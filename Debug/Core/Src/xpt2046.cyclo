@@ -1,0 +1,7 @@
+../Core/Src/xpt2046.c:7:9:xpt2046_spi_transfer	1
+../Core/Src/xpt2046.c:14:9:xpt2046_write_byte	1
+../Core/Src/xpt2046.c:19:6:xpt2046_init	1
+../Core/Src/xpt2046.c:26:10:xpt2046_read_ad_value	1
+../Core/Src/xpt2046.c:43:10:xpt2046_read_average	6
+../Core/Src/xpt2046.c:68:6:xpt2046_read_xy	1
+../Core/Src/xpt2046.c:75:9:xpt2046_twice_read_xy	9
