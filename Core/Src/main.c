@@ -173,7 +173,6 @@ void Audio_FillHalf(uint16_t startIndex)
 
 uint8_t Audio_Start(void)
 {
-    UINT br;
     UINT scanRead;
     FRESULT fres;
     char dbg[40];
@@ -185,7 +184,7 @@ uint8_t Audio_Start(void)
 
     if (!sd_ready)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: SD not ready", FONT_1206, RED);
         return 0;
     }
@@ -194,7 +193,7 @@ uint8_t Audio_Start(void)
     if (fres != FR_OK)
     {
         sprintf(dbg, "ERR open: %d", fres);
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         return 0;
     }
@@ -205,7 +204,7 @@ uint8_t Audio_Start(void)
     if (fres != FR_OK || scanRead < 44)
     {
         sprintf(dbg, "ERR read: %d/%u", fres, scanRead);
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -214,7 +213,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[0], "RIFF", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no RIFF", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -223,7 +222,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[8], "WAVE", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no WAVE", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -232,7 +231,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[12], "fmt ", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no fmt", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -242,7 +241,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[20]) != 1)
     {
         sprintf(dbg, "ERR fmt=%u", WAV_ReadU16(&scanBuf[20]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -252,7 +251,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[22]) != 1)
     {
         sprintf(dbg, "ERR ch=%u", WAV_ReadU16(&scanBuf[22]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -262,7 +261,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU32(&scanBuf[24]) != 16000)
     {
         sprintf(dbg, "ERR rate=%lu", WAV_ReadU32(&scanBuf[24]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -272,7 +271,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[34]) != 8)
     {
         sprintf(dbg, "ERR bits=%u", WAV_ReadU16(&scanBuf[34]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -291,7 +290,7 @@ uint8_t Audio_Start(void)
 
     if (wavDataOffset == 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -300,7 +299,7 @@ uint8_t Audio_Start(void)
 
     if (f_lseek(&musicFile, wavDataOffset) != FR_OK)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: seek data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -499,6 +498,10 @@ int main(void)
   lcd_fill_rect(10, 180, 220, 130, WHITE);
   lcd_display_string(20, 190, (uint8_t *)"Data...", FONT_1206, BLACK);
 
+  /* UI da ve xong -> bat backlight. Nguoi dung se thay UI hien ra lien,
+     khong thay cac giai doan clear trang/xam trung gian. */
+  LCD_BKL_H();
+
   /* Khoi tao SD */
   hsd_res = HAL_SD_Init(&hsd);
   if (hsd_res != HAL_OK)
@@ -573,7 +576,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   uint32_t last_temp_update = 0;
   uint32_t last_time_update = 0;
-  char last_time_str[16] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
+  char last_time_str[24] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
   char last_temp_str[16] = "       ";         /* 7 spaces:  "XX.XX C" */
 
   const int CHAR_W = 6;   /* FONT_1206: rong 6, cao 12 */
@@ -606,10 +609,10 @@ int main(void)
           uint32_t cur_s = played / AUDIO_SAMPLE_RATE;
           uint32_t tot_s = total / AUDIO_SAMPLE_RATE;
 
-          char new_time_str[16];
-          sprintf(new_time_str, "%02lu:%02lu / %02lu:%02lu",
-                  (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
-                  (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
+          char new_time_str[24];
+          snprintf(new_time_str, sizeof(new_time_str), "%02lu:%02lu / %02lu:%02lu",
+                   (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
+                   (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
 
           const int T_X = 20;
           const int T_Y = 275;
