@@ -31,7 +31,11 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef enum {
+    AUDIO_STOPPED = 0,
+    AUDIO_PAUSED,
+    AUDIO_PLAYING
+} AudioState_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -79,6 +83,8 @@ volatile UINT wavDataOffset = WAV_HEADER_SIZE;
 
 volatile uint32_t audio_total_samples = 0;
 volatile uint32_t audio_played_samples = 0;
+volatile AudioState_t audio_state = AUDIO_STOPPED;
+volatile uint8_t audio_finished = 0;
 //uint32_t adc_value;
 //float temperature;
 
@@ -111,6 +117,8 @@ static void MX_TIM6_Init(void);
 float Read_Temperature(void);
 uint8_t Audio_Start(void);
 void Audio_Stop(void);
+void Audio_Pause(void);
+void Audio_Reset(void);
 void Audio_Service(void);
 void Audio_FillHalf(uint16_t startIndex);
 uint16_t WAV_ReadU16(const uint8_t *p);
@@ -312,6 +320,7 @@ uint8_t Audio_Start(void)
     HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
 
     audio_playing = 1;
+    audio_state = AUDIO_PLAYING;
     return 1;
 }
 
@@ -331,6 +340,34 @@ void Audio_Stop(void)
     }
 }
 
+void Audio_Pause(void)
+{
+    if (audio_state == AUDIO_PLAYING)
+    {
+        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop(&htim6);
+        audio_playing = 0;
+        audio_state = AUDIO_PAUSED;
+    }
+}
+
+void Audio_Reset(void)
+{
+    if (audio_playing)
+    {
+        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop(&htim6);
+        audio_playing = 0;
+    }
+    if (music_file_opened)
+    {
+        f_close(&musicFile);
+        music_file_opened = 0;
+    }
+    audio_state = AUDIO_STOPPED;
+    audio_played_samples = 0;
+}
+
 void Audio_Service(void)
 {
     if (!audio_playing)
@@ -340,6 +377,12 @@ void Audio_Service(void)
     {
         audio_half_req = 0;
         audio_played_samples += AUDIO_HALF_SAMPLES;
+        if (audio_total_samples && audio_played_samples >= audio_total_samples)
+        {
+            Audio_Reset();
+            audio_finished = 1;
+            return;
+        }
         Audio_FillHalf(0);
     }
 
@@ -347,6 +390,12 @@ void Audio_Service(void)
     {
         audio_full_req = 0;
         audio_played_samples += AUDIO_HALF_SAMPLES;
+        if (audio_total_samples && audio_played_samples >= audio_total_samples)
+        {
+            Audio_Reset();
+            audio_finished = 1;
+            return;
+        }
         Audio_FillHalf(AUDIO_HALF_SAMPLES);
     }
 }
@@ -402,8 +451,6 @@ int main(void)
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
     FRESULT res;
-    UINT bytesRead;
-    char buffer[128];
     HAL_StatusTypeDef hsd_res;
 
     sd_ready = 0;
@@ -488,10 +535,10 @@ int main(void)
 
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)Adc.Raw, 2);
     HAL_TIM_Base_Start(&htim3);
-    /* USER CODE END 2 */
+  /* USER CODE END 2 */
 
-    /* Infinite loop */
-    /* USER CODE BEGIN WHILE */
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
     uint32_t last_temp_update = 0;
     uint32_t last_time_update = 0;
     char last_time_str[24] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
