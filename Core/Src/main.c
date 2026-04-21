@@ -40,11 +40,6 @@
 #define AUDIO_BUFFER_SAMPLES   4096
 #define AUDIO_HALF_SAMPLES     (AUDIO_BUFFER_SAMPLES / 2)
 #define AUDIO_SAMPLE_RATE      16000
-
-/* Audio state machine */
-#define AUDIO_STOPPED   0
-#define AUDIO_PLAYING   1
-#define AUDIO_PAUSED    2
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,7 +64,6 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-FIL myFile;
 FIL musicFile;
 
 uint16_t dacBuffer[AUDIO_BUFFER_SAMPLES];
@@ -77,11 +71,10 @@ uint8_t wavTemp[AUDIO_HALF_SAMPLES];
 uint8_t wavHeader[WAV_HEADER_SIZE];
 
 volatile uint8_t sd_ready = 0;
-volatile uint8_t audio_state = AUDIO_STOPPED;
+volatile uint8_t audio_playing = 0;
 volatile uint8_t audio_half_req = 0;
 volatile uint8_t audio_full_req = 0;
 volatile uint8_t music_file_opened = 0;
-volatile uint8_t audio_finished = 0;        /* set khi bai nhac chay het tu dong */
 volatile UINT wavDataOffset = WAV_HEADER_SIZE;
 
 volatile uint32_t audio_total_samples = 0;
@@ -117,9 +110,7 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 float Read_Temperature(void);
 uint8_t Audio_Start(void);
-void Audio_Pause(void);
-void Audio_Resume(void);
-void Audio_Reset(void);
+void Audio_Stop(void);
 void Audio_Service(void);
 void Audio_FillHalf(uint16_t startIndex);
 uint16_t WAV_ReadU16(const uint8_t *p);
@@ -156,10 +147,8 @@ void Audio_FillHalf(uint16_t startIndex)
 
         if (br == 0)
         {
-            /* EOF -> fill phan con lai bang silence (0x80 cho 8-bit unsigned) */
-            for (UINT k = total; k < AUDIO_HALF_SAMPLES; k++)
-                wavTemp[k] = 0x80;
-            break;
+            f_lseek(&musicFile, wavDataOffset);   // quay lại đúng đầu data
+            continue;
         }
 
         total += br;
@@ -170,7 +159,6 @@ void Audio_FillHalf(uint16_t startIndex)
         dacBuffer[startIndex + i] = ((uint16_t)wavTemp[i]) << 4;   // 8-bit unsigned -> 12-bit DAC
     }
 }
-
 uint8_t Audio_Start(void)
 {
     UINT scanRead;
@@ -179,21 +167,21 @@ uint8_t Audio_Start(void)
     uint16_t i;
     uint8_t scanBuf[256];
 
-    if (audio_state != AUDIO_STOPPED)
-        return 1;
-
     if (!sd_ready)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: SD not ready", FONT_1206, RED);
         return 0;
     }
+
+    if (audio_playing)
+        return 1;
 
     fres = f_open(&musicFile, "music.wav", FA_READ);
     if (fres != FR_OK)
     {
         sprintf(dbg, "ERR open: %d", fres);
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         return 0;
     }
@@ -204,7 +192,7 @@ uint8_t Audio_Start(void)
     if (fres != FR_OK || scanRead < 44)
     {
         sprintf(dbg, "ERR read: %d/%u", fres, scanRead);
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -213,7 +201,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[0], "RIFF", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no RIFF", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -222,7 +210,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[8], "WAVE", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no WAVE", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -231,7 +219,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[12], "fmt ", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no fmt", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -241,7 +229,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[20]) != 1)
     {
         sprintf(dbg, "ERR fmt=%u", WAV_ReadU16(&scanBuf[20]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -251,7 +239,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[22]) != 1)
     {
         sprintf(dbg, "ERR ch=%u", WAV_ReadU16(&scanBuf[22]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -261,7 +249,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU32(&scanBuf[24]) != 16000)
     {
         sprintf(dbg, "ERR rate=%lu", WAV_ReadU32(&scanBuf[24]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -271,7 +259,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[34]) != 8)
     {
         sprintf(dbg, "ERR bits=%u", WAV_ReadU16(&scanBuf[34]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -290,7 +278,7 @@ uint8_t Audio_Start(void)
 
     if (wavDataOffset == 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -299,21 +287,20 @@ uint8_t Audio_Start(void)
 
     if (f_lseek(&musicFile, wavDataOffset) != FR_OK)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: seek data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
         return 0;
     }
 
-    /* Tinh tong so samples = file_size - data_offset (8-bit mono -> 1 byte/sample) */
+    /* Tinh tong so samples = (file_size - header_offset) / 1 byte per sample */
     uint32_t file_size = f_size(&musicFile);
     if (file_size > wavDataOffset)
         audio_total_samples = file_size - wavDataOffset;
     else
         audio_total_samples = 0;
     audio_played_samples = 0;
-    audio_finished = 0;
 
     Audio_FillHalf(0);
     Audio_FillHalf(AUDIO_HALF_SAMPLES);
@@ -324,48 +311,17 @@ uint8_t Audio_Start(void)
     HAL_TIM_Base_Start(&htim6);
     HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
 
-    audio_state = AUDIO_PLAYING;
+    audio_playing = 1;
     return 1;
 }
 
-/* Pause: giu file mo + giu vi tri + giu counter */
-void Audio_Pause(void)
+void Audio_Stop(void)
 {
-    if (audio_state != AUDIO_PLAYING)
-        return;
-
-    HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
-    HAL_TIM_Base_Stop(&htim6);
-
-    audio_state = AUDIO_PAUSED;
-}
-
-/* Resume: nap lai buffer tu vi tri file hien tai roi chay tiep */
-void Audio_Resume(void)
-{
-    if (audio_state != AUDIO_PAUSED)
-        return;
-
-    /* Nap lai buffer de tranh nghe lai doan cu trong dacBuffer */
-    Audio_FillHalf(0);
-    Audio_FillHalf(AUDIO_HALF_SAMPLES);
-
-    audio_half_req = 0;
-    audio_full_req = 0;
-
-    HAL_TIM_Base_Start(&htim6);
-    HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
-
-    audio_state = AUDIO_PLAYING;
-}
-
-/* Reset: dong file + reset counter ve dau */
-void Audio_Reset(void)
-{
-    if (audio_state == AUDIO_PLAYING)
+    if (audio_playing)
     {
         HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
         HAL_TIM_Base_Stop(&htim6);
+        audio_playing = 0;
     }
 
     if (music_file_opened)
@@ -373,16 +329,11 @@ void Audio_Reset(void)
         f_close(&musicFile);
         music_file_opened = 0;
     }
-
-    audio_state = AUDIO_STOPPED;
-    audio_played_samples = 0;
-    audio_total_samples = 0;
-    audio_finished = 0;
 }
 
 void Audio_Service(void)
 {
-    if (audio_state != AUDIO_PLAYING)
+    if (!audio_playing)
         return;
 
     if (audio_half_req)
@@ -397,22 +348,6 @@ void Audio_Service(void)
         audio_full_req = 0;
         audio_played_samples += AUDIO_HALF_SAMPLES;
         Audio_FillHalf(AUDIO_HALF_SAMPLES);
-    }
-
-    /* Het bai -> tu dong dung hoan toan */
-    if (audio_total_samples > 0 && audio_played_samples >= audio_total_samples)
-    {
-        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
-        HAL_TIM_Base_Stop(&htim6);
-
-        if (music_file_opened)
-        {
-            f_close(&musicFile);
-            music_file_opened = 0;
-        }
-
-        audio_state = AUDIO_STOPPED;
-        audio_finished = 1;   /* bao main loop cap nhat UI */
     }
 }
 
@@ -467,8 +402,6 @@ int main(void)
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   FRESULT res;
-  UINT bytesRead;
-  char buffer[128];
   HAL_StatusTypeDef hsd_res;
 
   sd_ready = 0;
@@ -498,10 +431,6 @@ int main(void)
   lcd_fill_rect(10, 180, 220, 130, WHITE);
   lcd_display_string(20, 190, (uint8_t *)"Data...", FONT_1206, BLACK);
 
-  /* UI da ve xong -> bat backlight. Nguoi dung se thay UI hien ra lien,
-     khong thay cac giai doan clear trang/xam trung gian. */
-  LCD_BKL_H();
-
   /* Khoi tao SD */
   hsd_res = HAL_SD_Init(&hsd);
   if (hsd_res != HAL_OK)
@@ -527,36 +456,18 @@ int main(void)
               sd_ready = 1;
               lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
 
-              /* doc test.txt de kiem tra */
-              res = f_open(&myFile, "test.txt", FA_READ);
-              if (res == FR_OK)
-              {
-                  f_read(&myFile, buffer, sizeof(buffer) - 1, &bytesRead);
-                  buffer[bytesRead] = '\0';
-
-                  lcd_fill_rect(20, 230, 200, 20, WHITE);
-                  lcd_display_string(20, 230, (uint8_t*)buffer, FONT_1206, BLACK);
-
-                  f_close(&myFile);
-              }
-              else
-              {
-                  lcd_fill_rect(20, 230, 200, 20, WHITE);
-                  lcd_display_string(20, 230, (uint8_t*)"test.txt FAIL", FONT_1206, RED);
-              }
-
               /* kiem tra co music.wav khong */
               res = f_open(&musicFile, "music.wav", FA_READ);
               if (res == FR_OK)
               {
                   f_close(&musicFile);
-                  lcd_fill_rect(20, 250, 200, 20, WHITE);
-                  lcd_display_string(20, 250, (uint8_t*)"music.wav READY", FONT_1206, GREEN);
+                  lcd_fill_rect(20, 230, 200, 20, WHITE);
+                  lcd_display_string(20, 230, (uint8_t*)"music.wav READY", FONT_1206, GREEN);
               }
               else
               {
-                  lcd_fill_rect(20, 250, 200, 20, WHITE);
-                  lcd_display_string(20, 250, (uint8_t*)"music.wav FAIL", FONT_1206, RED);
+                  lcd_fill_rect(20, 230, 200, 20, WHITE);
+                  lcd_display_string(20, 230, (uint8_t*)"music.wav FAIL", FONT_1206, RED);
               }
           }
           else
@@ -576,143 +487,90 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   uint32_t last_temp_update = 0;
   uint32_t last_time_update = 0;
-  char last_time_str[24] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
-  char last_temp_str[16] = "       ";         /* 7 spaces:  "XX.XX C" */
-
-  const int CHAR_W = 6;   /* FONT_1206: rong 6, cao 12 */
-  const int CHAR_H = 12;
 
   while (1)
   {
       Audio_Service();
 
-      /* --- XU LY HET BAI TU DONG --- */
-      if (audio_finished)
+      /* --- HIEN THI THOI GIAN BAI NHAC --- */
+      if (audio_playing && audio_total_samples > 0 &&
+          HAL_GetTick() - last_time_update > 500)
       {
-          audio_finished = 0;
-          lcd_fill_rect(15, 185, 200, 25, WHITE);
-          lcd_display_string(20, 190, (uint8_t *)"Nhac: HET BAI", FONT_1206, BLACK);
-          lcd_fill_rect(15, 273, 200, 15, WHITE);
-          memset(last_time_str, ' ', 13);
-          last_time_str[13] = '\0';
-      }
-
-      /* --- HIEN THI THOI GIAN BAI NHAC (muot) --- */
-      if (audio_state == AUDIO_PLAYING && audio_total_samples > 0 &&
-          HAL_GetTick() - last_time_update > 200)
-      {
-          last_time_update = HAL_GetTick();
-
           uint32_t played = audio_played_samples;
           uint32_t total  = audio_total_samples;
-          if (played > total) played = total;
-          uint32_t cur_s = played / AUDIO_SAMPLE_RATE;
+
+          uint32_t cur_s = (played % total) / AUDIO_SAMPLE_RATE;
           uint32_t tot_s = total / AUDIO_SAMPLE_RATE;
 
-          char new_time_str[24];
-          snprintf(new_time_str, sizeof(new_time_str), "%02lu:%02lu / %02lu:%02lu",
-                   (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
-                   (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
+          char tbuf[32];
+          sprintf(tbuf, "%02lu:%02lu / %02lu:%02lu",
+                  (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
+                  (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
 
-          const int T_X = 20;
-          const int T_Y = 275;
+          lcd_fill_rect(15, 273, 200, 15, WHITE);
+          lcd_display_string(20, 275, (uint8_t *)tbuf, FONT_1206, BLACK);
 
-          for (int i = 0; new_time_str[i] != '\0' && i < 15; i++)
-          {
-              if (last_time_str[i] != new_time_str[i])
-              {
-                  lcd_fill_rect(T_X + i * CHAR_W, T_Y, CHAR_W, CHAR_H, WHITE);
-                  char tmp[2] = { new_time_str[i], '\0' };
-                  lcd_display_string(T_X + i * CHAR_W, T_Y,
-                                     (uint8_t *)tmp, FONT_1206, BLACK);
-              }
-          }
-          strcpy(last_time_str, new_time_str);
+          last_time_update = HAL_GetTick();
       }
 
-      /* --- CAP NHAT NHIET DO (muot, khong nhay) --- */
+      /* --- PHẦN 1: CẬP NHẬT NHIỆT ĐỘ --- */
       if (Flg.ADCCMPLT)
       {
-          if (HAL_GetTick() - last_temp_update > ((audio_state == AUDIO_PLAYING) ? 2000 : 1000))
+          //if (HAL_GetTick() - last_temp_update > 1000)
+    	  if (HAL_GetTick() - last_temp_update > (audio_playing ? 2000 : 1000))
           {
+              char buf[32];
               int temp_int, temp_frac;
 
               Adc.IntSensTmp = TMPSENSOR_getTemperature(Adc.Raw[1], Adc.Raw[0]);
               temp_int = (int)Adc.IntSensTmp;
               temp_frac = (int)((Adc.IntSensTmp - temp_int) * 100.0f);
-              if (temp_frac < 0) temp_frac = -temp_frac;
+              sprintf(buf, "%d.%02d C", temp_int, temp_frac);
 
-              char new_temp_str[16];
-              sprintf(new_temp_str, "%2d.%02d C", temp_int, temp_frac);
-
-              const int TMP_X = 155;
-              const int TMP_Y = 64;
-
-              for (int i = 0; new_temp_str[i] != '\0' && i < 15; i++)
-              {
-                  if (last_temp_str[i] != new_temp_str[i])
-                  {
-                      lcd_fill_rect(TMP_X + i * CHAR_W, TMP_Y, CHAR_W, CHAR_H, WHITE);
-                      char tmp[2] = { new_temp_str[i], '\0' };
-                      lcd_display_string(TMP_X + i * CHAR_W, TMP_Y,
-                                         (uint8_t *)tmp, FONT_1206, BLACK);
-                  }
-              }
-              strcpy(last_temp_str, new_temp_str);
+              lcd_fill_rect(150, 64, 70, 12, WHITE);
+              lcd_display_string(155, 64, (uint8_t *)buf, FONT_1206, BLACK);
 
               last_temp_update = HAL_GetTick();
           }
           Flg.ADCCMPLT = 0;
       }
 
-      /* --- XU LY CAM UNG --- */
+      /* --- PHẦN 2: XỬ LÝ CẢM ỨNG (DÙNG GIÁ TRỊ RAW) --- */
       uint16_t raw_x = 0;
       uint16_t raw_y = 0;
 
       if (Get_Touch_XY(&raw_x, &raw_y))
       {
+//          char dbg_buf[32];
+//          sprintf(dbg_buf, "Raw X:%04d Y:%04d", raw_x, raw_y);
+//          lcd_fill_rect(10, 280, 200, 20, WHITE);
+//          lcd_display_string(10, 280, (uint8_t *)dbg_buf, FONT_1206, RED);
+
           /* Khung nut Play/Pause */
           if (raw_x >= 1900 && raw_x <= 2700 && raw_y >= 1000 && raw_y <= 2900)
           {
               if (raw_y >= 1900)   /* PLAY */
               {
-                  if (audio_state == AUDIO_STOPPED)
+                  lcd_fill_rect(15, 185, 200, 25, WHITE);
+
+                  if (Audio_Start())
                   {
-                      /* Bat dau tu dau */
-                      lcd_fill_rect(15, 185, 200, 25, WHITE);
-                      if (Audio_Start())
-                      {
-                          lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
-                      }
-                  }
-                  else if (audio_state == AUDIO_PAUSED)
-                  {
-                      /* Tiep tuc tu vi tri pause */
-                      Audio_Resume();
-                      lcd_fill_rect(15, 185, 200, 25, WHITE);
                       lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
                   }
-                  HAL_Delay(300);
+//                  else
+//                  {
+//                      lcd_display_string(20, 190, (uint8_t *)"music.wav FAIL", FONT_1206, RED);
+//                  }
+
+                  //HAL_Delay(300);
+                  //HAL_Delay(30);
               }
               else                  /* PAUSE */
               {
-                  if (audio_state == AUDIO_PLAYING)
-                  {
-                      /* Pause lan dau: tam dung, giu vi tri */
-                      Audio_Pause();
-                      lcd_fill_rect(15, 185, 200, 25, WHITE);
-                      lcd_display_string(20, 190, (uint8_t *)"Nhac: PAUSED", FONT_1206, BLACK);
-                  }
-                  else if (audio_state == AUDIO_PAUSED)
-                  {
-                      /* Pause lan 2: reset ve dau, lan play sau chay lai tu dau */
-                      Audio_Reset();
-                      lcd_fill_rect(15, 185, 200, 25, WHITE);
-                      lcd_display_string(20, 190, (uint8_t *)"Nhac: STOPPED", FONT_1206, BLACK);
-                      lcd_fill_rect(15, 273, 200, 15, WHITE);
-                      memset(last_time_str, ' ', 13);
-                      last_time_str[13] = '\0';
-                  }
+                  Audio_Stop();
+                  lcd_fill_rect(15, 185, 200, 25, WHITE);
+                  lcd_display_string(20, 190, (uint8_t *)"Nhac: PAUSED...", FONT_1206, BLACK);
+                  lcd_fill_rect(15, 273, 200, 15, WHITE);   // xoa dong thoi gian
                   HAL_Delay(300);
               }
           }
