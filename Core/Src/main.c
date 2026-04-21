@@ -40,11 +40,6 @@
 #define AUDIO_BUFFER_SAMPLES   4096
 #define AUDIO_HALF_SAMPLES     (AUDIO_BUFFER_SAMPLES / 2)
 #define AUDIO_SAMPLE_RATE      16000
-
-/* Audio state machine */
-#define AUDIO_STOPPED   0
-#define AUDIO_PLAYING   1
-#define AUDIO_PAUSED    2
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,7 +64,6 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-FIL myFile;
 FIL musicFile;
 
 uint16_t dacBuffer[AUDIO_BUFFER_SAMPLES];
@@ -77,11 +71,10 @@ uint8_t wavTemp[AUDIO_HALF_SAMPLES];
 uint8_t wavHeader[WAV_HEADER_SIZE];
 
 volatile uint8_t sd_ready = 0;
-volatile uint8_t audio_state = AUDIO_STOPPED;
+volatile uint8_t audio_playing = 0;
 volatile uint8_t audio_half_req = 0;
 volatile uint8_t audio_full_req = 0;
 volatile uint8_t music_file_opened = 0;
-volatile uint8_t audio_finished = 0;        /* set khi bai nhac chay het tu dong */
 volatile UINT wavDataOffset = WAV_HEADER_SIZE;
 
 volatile uint32_t audio_total_samples = 0;
@@ -117,9 +110,7 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 float Read_Temperature(void);
 uint8_t Audio_Start(void);
-void Audio_Pause(void);
-void Audio_Resume(void);
-void Audio_Reset(void);
+void Audio_Stop(void);
 void Audio_Service(void);
 void Audio_FillHalf(uint16_t startIndex);
 uint16_t WAV_ReadU16(const uint8_t *p);
@@ -156,10 +147,8 @@ void Audio_FillHalf(uint16_t startIndex)
 
         if (br == 0)
         {
-            /* EOF -> fill phan con lai bang silence (0x80 cho 8-bit unsigned) */
-            for (UINT k = total; k < AUDIO_HALF_SAMPLES; k++)
-                wavTemp[k] = 0x80;
-            break;
+            f_lseek(&musicFile, wavDataOffset);   // quay lại đúng đầu data
+            continue;
         }
 
         total += br;
@@ -170,7 +159,6 @@ void Audio_FillHalf(uint16_t startIndex)
         dacBuffer[startIndex + i] = ((uint16_t)wavTemp[i]) << 4;   // 8-bit unsigned -> 12-bit DAC
     }
 }
-
 uint8_t Audio_Start(void)
 {
     UINT scanRead;
@@ -179,21 +167,21 @@ uint8_t Audio_Start(void)
     uint16_t i;
     uint8_t scanBuf[256];
 
-    if (audio_state != AUDIO_STOPPED)
-        return 1;
-
     if (!sd_ready)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: SD not ready", FONT_1206, RED);
         return 0;
     }
+
+    if (audio_playing)
+        return 1;
 
     fres = f_open(&musicFile, "music.wav", FA_READ);
     if (fres != FR_OK)
     {
         sprintf(dbg, "ERR open: %d", fres);
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         return 0;
     }
@@ -204,7 +192,7 @@ uint8_t Audio_Start(void)
     if (fres != FR_OK || scanRead < 44)
     {
         sprintf(dbg, "ERR read: %d/%u", fres, scanRead);
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -213,7 +201,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[0], "RIFF", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no RIFF", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -222,7 +210,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[8], "WAVE", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no WAVE", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -231,7 +219,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[12], "fmt ", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no fmt", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -241,7 +229,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[20]) != 1)
     {
         sprintf(dbg, "ERR fmt=%u", WAV_ReadU16(&scanBuf[20]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -251,7 +239,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[22]) != 1)
     {
         sprintf(dbg, "ERR ch=%u", WAV_ReadU16(&scanBuf[22]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -261,7 +249,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU32(&scanBuf[24]) != 16000)
     {
         sprintf(dbg, "ERR rate=%lu", WAV_ReadU32(&scanBuf[24]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -271,7 +259,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[34]) != 8)
     {
         sprintf(dbg, "ERR bits=%u", WAV_ReadU16(&scanBuf[34]));
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -290,7 +278,7 @@ uint8_t Audio_Start(void)
 
     if (wavDataOffset == 0)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -299,21 +287,20 @@ uint8_t Audio_Start(void)
 
     if (f_lseek(&musicFile, wavDataOffset) != FR_OK)
     {
-        lcd_fill_rect(15, 185, 210, 25, WHITE);
+        lcd_fill_rect(15, 185, 220, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: seek data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
         return 0;
     }
 
-    /* Tinh tong so samples = file_size - data_offset (8-bit mono -> 1 byte/sample) */
+    /* Tinh tong so samples = (file_size - header_offset) / 1 byte per sample */
     uint32_t file_size = f_size(&musicFile);
     if (file_size > wavDataOffset)
         audio_total_samples = file_size - wavDataOffset;
     else
         audio_total_samples = 0;
     audio_played_samples = 0;
-    audio_finished = 0;
 
     Audio_FillHalf(0);
     Audio_FillHalf(AUDIO_HALF_SAMPLES);
@@ -324,48 +311,17 @@ uint8_t Audio_Start(void)
     HAL_TIM_Base_Start(&htim6);
     HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
 
-    audio_state = AUDIO_PLAYING;
+    audio_playing = 1;
     return 1;
 }
 
-/* Pause: giu file mo + giu vi tri + giu counter */
-void Audio_Pause(void)
+void Audio_Stop(void)
 {
-    if (audio_state != AUDIO_PLAYING)
-        return;
-
-    HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
-    HAL_TIM_Base_Stop(&htim6);
-
-    audio_state = AUDIO_PAUSED;
-}
-
-/* Resume: nap lai buffer tu vi tri file hien tai roi chay tiep */
-void Audio_Resume(void)
-{
-    if (audio_state != AUDIO_PAUSED)
-        return;
-
-    /* Nap lai buffer de tranh nghe lai doan cu trong dacBuffer */
-    Audio_FillHalf(0);
-    Audio_FillHalf(AUDIO_HALF_SAMPLES);
-
-    audio_half_req = 0;
-    audio_full_req = 0;
-
-    HAL_TIM_Base_Start(&htim6);
-    HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
-
-    audio_state = AUDIO_PLAYING;
-}
-
-/* Reset: dong file + reset counter ve dau */
-void Audio_Reset(void)
-{
-    if (audio_state == AUDIO_PLAYING)
+    if (audio_playing)
     {
         HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
         HAL_TIM_Base_Stop(&htim6);
+        audio_playing = 0;
     }
 
     if (music_file_opened)
@@ -373,16 +329,11 @@ void Audio_Reset(void)
         f_close(&musicFile);
         music_file_opened = 0;
     }
-
-    audio_state = AUDIO_STOPPED;
-    audio_played_samples = 0;
-    audio_total_samples = 0;
-    audio_finished = 0;
 }
 
 void Audio_Service(void)
 {
-    if (audio_state != AUDIO_PLAYING)
+    if (!audio_playing)
         return;
 
     if (audio_half_req)
@@ -397,22 +348,6 @@ void Audio_Service(void)
         audio_full_req = 0;
         audio_played_samples += AUDIO_HALF_SAMPLES;
         Audio_FillHalf(AUDIO_HALF_SAMPLES);
-    }
-
-    /* Het bai -> tu dong dung hoan toan */
-    if (audio_total_samples > 0 && audio_played_samples >= audio_total_samples)
-    {
-        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
-        HAL_TIM_Base_Stop(&htim6);
-
-        if (music_file_opened)
-        {
-            f_close(&musicFile);
-            music_file_opened = 0;
-        }
-
-        audio_state = AUDIO_STOPPED;
-        audio_finished = 1;   /* bao main loop cap nhat UI */
     }
 }
 
