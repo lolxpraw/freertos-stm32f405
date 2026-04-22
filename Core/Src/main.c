@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "fatfs.h"
+//#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -27,15 +28,14 @@
 #include "stdio.h"
 #include "tmpsensor.h"
 #include "touch.h"
+#include "usb_device.h"
+#include "usbd_core.h"
+extern USBD_HandleTypeDef hUsbDeviceHS;
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef enum {
-    AUDIO_STOPPED = 0,
-    AUDIO_PAUSED,
-    AUDIO_PLAYING
-} AudioState_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -44,6 +44,11 @@ typedef enum {
 #define AUDIO_BUFFER_SAMPLES   4096
 #define AUDIO_HALF_SAMPLES     (AUDIO_BUFFER_SAMPLES / 2)
 #define AUDIO_SAMPLE_RATE      16000
+
+/* Audio state machine */
+#define AUDIO_STOPPED   0
+#define AUDIO_PLAYING   1
+#define AUDIO_PAUSED    2
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -68,6 +73,7 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+FIL myFile;
 FIL musicFile;
 
 uint16_t dacBuffer[AUDIO_BUFFER_SAMPLES];
@@ -75,16 +81,16 @@ uint8_t wavTemp[AUDIO_HALF_SAMPLES];
 uint8_t wavHeader[WAV_HEADER_SIZE];
 
 volatile uint8_t sd_ready = 0;
-volatile uint8_t audio_playing = 0;
+volatile uint8_t usb_msc_mode = 0;
+volatile uint8_t audio_state = AUDIO_STOPPED;
 volatile uint8_t audio_half_req = 0;
 volatile uint8_t audio_full_req = 0;
 volatile uint8_t music_file_opened = 0;
+volatile uint8_t audio_finished = 0;        /* set khi bai nhac chay het tu dong */
 volatile UINT wavDataOffset = WAV_HEADER_SIZE;
 
 volatile uint32_t audio_total_samples = 0;
 volatile uint32_t audio_played_samples = 0;
-volatile AudioState_t audio_state = AUDIO_STOPPED;
-volatile uint8_t audio_finished = 0;
 //uint32_t adc_value;
 //float temperature;
 
@@ -116,11 +122,14 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 float Read_Temperature(void);
 uint8_t Audio_Start(void);
-void Audio_Stop(void);
 void Audio_Pause(void);
+void Audio_Resume(void);
 void Audio_Reset(void);
 void Audio_Service(void);
 void Audio_FillHalf(uint16_t startIndex);
+void Refresh_Music_Status(void);
+uint8_t Enter_USB_MSC_Mode(void);
+uint8_t Exit_USB_MSC_Mode(void);
 uint16_t WAV_ReadU16(const uint8_t *p);
 uint32_t WAV_ReadU32(const uint8_t *p);
 /* USER CODE END PFP */
@@ -155,8 +164,10 @@ void Audio_FillHalf(uint16_t startIndex)
 
         if (br == 0)
         {
-            f_lseek(&musicFile, wavDataOffset);   // quay lại đúng đầu data
-            continue;
+            /* EOF -> fill phan con lai bang silence (0x80 cho 8-bit unsigned) */
+            for (UINT k = total; k < AUDIO_HALF_SAMPLES; k++)
+                wavTemp[k] = 0x80;
+            break;
         }
 
         total += br;
@@ -167,6 +178,7 @@ void Audio_FillHalf(uint16_t startIndex)
         dacBuffer[startIndex + i] = ((uint16_t)wavTemp[i]) << 4;   // 8-bit unsigned -> 12-bit DAC
     }
 }
+
 uint8_t Audio_Start(void)
 {
     UINT scanRead;
@@ -175,21 +187,21 @@ uint8_t Audio_Start(void)
     uint16_t i;
     uint8_t scanBuf[256];
 
+    if (audio_state != AUDIO_STOPPED)
+        return 1;
+
     if (!sd_ready)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: SD not ready", FONT_1206, RED);
         return 0;
     }
-
-    if (audio_playing)
-        return 1;
 
     fres = f_open(&musicFile, "music.wav", FA_READ);
     if (fres != FR_OK)
     {
         sprintf(dbg, "ERR open: %d", fres);
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         return 0;
     }
@@ -200,7 +212,7 @@ uint8_t Audio_Start(void)
     if (fres != FR_OK || scanRead < 44)
     {
         sprintf(dbg, "ERR read: %d/%u", fres, scanRead);
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -209,7 +221,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[0], "RIFF", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no RIFF", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -218,7 +230,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[8], "WAVE", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no WAVE", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -227,7 +239,7 @@ uint8_t Audio_Start(void)
 
     if (memcmp(&scanBuf[12], "fmt ", 4) != 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no fmt", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -237,7 +249,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[20]) != 1)
     {
         sprintf(dbg, "ERR fmt=%u", WAV_ReadU16(&scanBuf[20]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -247,7 +259,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[22]) != 1)
     {
         sprintf(dbg, "ERR ch=%u", WAV_ReadU16(&scanBuf[22]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -257,7 +269,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU32(&scanBuf[24]) != 16000)
     {
         sprintf(dbg, "ERR rate=%lu", WAV_ReadU32(&scanBuf[24]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -267,7 +279,7 @@ uint8_t Audio_Start(void)
     if (WAV_ReadU16(&scanBuf[34]) != 8)
     {
         sprintf(dbg, "ERR bits=%u", WAV_ReadU16(&scanBuf[34]));
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)dbg, FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -286,7 +298,7 @@ uint8_t Audio_Start(void)
 
     if (wavDataOffset == 0)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: no data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
@@ -295,20 +307,21 @@ uint8_t Audio_Start(void)
 
     if (f_lseek(&musicFile, wavDataOffset) != FR_OK)
     {
-        lcd_fill_rect(15, 185, 220, 25, WHITE);
+        lcd_fill_rect(15, 185, 210, 25, WHITE);
         lcd_display_string(20, 190, (uint8_t *)"ERR: seek data", FONT_1206, RED);
         f_close(&musicFile);
         music_file_opened = 0;
         return 0;
     }
 
-    /* Tinh tong so samples = (file_size - header_offset) / 1 byte per sample */
+    /* Tinh tong so samples = file_size - data_offset (8-bit mono -> 1 byte/sample) */
     uint32_t file_size = f_size(&musicFile);
     if (file_size > wavDataOffset)
         audio_total_samples = file_size - wavDataOffset;
     else
         audio_total_samples = 0;
     audio_played_samples = 0;
+    audio_finished = 0;
 
     Audio_FillHalf(0);
     Audio_FillHalf(AUDIO_HALF_SAMPLES);
@@ -319,70 +332,71 @@ uint8_t Audio_Start(void)
     HAL_TIM_Base_Start(&htim6);
     HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
 
-    audio_playing = 1;
     audio_state = AUDIO_PLAYING;
     return 1;
 }
 
-void Audio_Stop(void)
+/* Pause: giu file mo + giu vi tri + giu counter */
+void Audio_Pause(void)
 {
-    if (audio_playing)
-    {
-        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
-        HAL_TIM_Base_Stop(&htim6);
-        audio_playing = 0;
-    }
+    if (audio_state != AUDIO_PLAYING)
+        return;
 
-    if (music_file_opened)
-    {
-        f_close(&musicFile);
-        music_file_opened = 0;
-    }
+    HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+    HAL_TIM_Base_Stop(&htim6);
+
+    audio_state = AUDIO_PAUSED;
 }
 
-void Audio_Pause(void)
+/* Resume: nap lai buffer tu vi tri file hien tai roi chay tiep */
+void Audio_Resume(void)
+{
+    if (audio_state != AUDIO_PAUSED)
+        return;
+
+    /* Nap lai buffer de tranh nghe lai doan cu trong dacBuffer */
+    Audio_FillHalf(0);
+    Audio_FillHalf(AUDIO_HALF_SAMPLES);
+
+    audio_half_req = 0;
+    audio_full_req = 0;
+
+    HAL_TIM_Base_Start(&htim6);
+    HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)dacBuffer, AUDIO_BUFFER_SAMPLES, DAC_ALIGN_12B_R);
+
+    audio_state = AUDIO_PLAYING;
+}
+
+/* Reset: dong file + reset counter ve dau */
+void Audio_Reset(void)
 {
     if (audio_state == AUDIO_PLAYING)
     {
         HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
         HAL_TIM_Base_Stop(&htim6);
-        audio_playing = 0;
-        audio_state = AUDIO_PAUSED;
     }
-}
 
-void Audio_Reset(void)
-{
-    if (audio_playing)
-    {
-        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
-        HAL_TIM_Base_Stop(&htim6);
-        audio_playing = 0;
-    }
     if (music_file_opened)
     {
         f_close(&musicFile);
         music_file_opened = 0;
     }
+
     audio_state = AUDIO_STOPPED;
     audio_played_samples = 0;
+    audio_total_samples = 0;
+    audio_finished = 0;
 }
 
 void Audio_Service(void)
 {
-    if (!audio_playing)
+    if (audio_state != AUDIO_PLAYING)
         return;
 
     if (audio_half_req)
     {
         audio_half_req = 0;
         audio_played_samples += AUDIO_HALF_SAMPLES;
-        if (audio_total_samples && audio_played_samples >= audio_total_samples)
-        {
-            Audio_Reset();
-            audio_finished = 1;
-            return;
-        }
         Audio_FillHalf(0);
     }
 
@@ -390,16 +404,111 @@ void Audio_Service(void)
     {
         audio_full_req = 0;
         audio_played_samples += AUDIO_HALF_SAMPLES;
-        if (audio_total_samples && audio_played_samples >= audio_total_samples)
-        {
-            Audio_Reset();
-            audio_finished = 1;
-            return;
-        }
         Audio_FillHalf(AUDIO_HALF_SAMPLES);
     }
-}
 
+    /* Het bai -> tu dong dung hoan toan */
+    if (audio_total_samples > 0 && audio_played_samples >= audio_total_samples)
+    {
+        HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop(&htim6);
+
+        if (music_file_opened)
+        {
+            f_close(&musicFile);
+            music_file_opened = 0;
+        }
+
+        audio_state = AUDIO_STOPPED;
+        audio_finished = 1;   /* bao main loop cap nhat UI */
+    }
+}
+void Refresh_Music_Status(void)
+{
+    FRESULT res;
+
+    if (!sd_ready) return;
+
+    res = f_open(&musicFile, "music.wav", FA_READ);
+    lcd_fill_rect(20, 230, 200, 20, WHITE);
+
+    if (res == FR_OK)
+    {
+        f_close(&musicFile);
+        lcd_display_string(20, 230, (uint8_t*)"music.wav READY", FONT_1206, GREEN);
+    }
+    else
+    {
+        lcd_display_string(20, 230, (uint8_t*)"music.wav FAIL", FONT_1206, RED);
+    }
+}
+uint8_t Enter_USB_MSC_Mode(void)
+{
+    if (usb_msc_mode) return 1;
+
+    /* Dung hẳn audio, đóng file */
+    Audio_Reset();
+
+    lcd_fill_rect(15, 185, 210, 25, WHITE);
+    lcd_display_string(20, 190, (uint8_t*)"USB MODE: START", FONT_1206, BLACK);
+
+    /* Xoa dong thoi gian cu */
+    lcd_fill_rect(15, 273, 200, 15, WHITE);
+
+    /* Unmount SD khoi FatFs */
+    f_mount(NULL, SDPath, 1);
+    HAL_Delay(100);
+
+    /* Bat USB MSC */
+    MX_USB_DEVICE_Init();
+    HAL_Delay(500);
+
+    usb_msc_mode = 1;
+
+    lcd_fill_rect(10, 250, 220, 20, WHITE);
+    lcd_display_string(20, 250, (uint8_t*)"PC: Copy music.wav", FONT_1206, BLUE);
+
+    return 1;
+}
+uint8_t Exit_USB_MSC_Mode(void)
+{
+    FRESULT res;
+
+    if (!usb_msc_mode) return 1;
+
+    lcd_fill_rect(15, 185, 210, 25, WHITE);
+    lcd_display_string(20, 190, (uint8_t*)"USB MODE: STOP", FONT_1206, BLACK);
+
+    /* Tat USB */
+    USBD_Stop(&hUsbDeviceHS);
+    USBD_DeInit(&hUsbDeviceHS);
+    HAL_Delay(300);
+
+    /* Mount lai SD */
+    res = f_mount(&SDFatFS, SDPath, 1);
+    if (res == FR_OK)
+    {
+        sd_ready = 1;
+        lcd_fill_rect(20, 210, 200, 20, WHITE);
+        lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
+    }
+    else
+    {
+        sd_ready = 0;
+        lcd_fill_rect(20, 210, 200, 20, WHITE);
+        lcd_display_string(20, 210, (uint8_t*)"Mount FAIL", FONT_1206, RED);
+        usb_msc_mode = 0;
+        return 0;
+    }
+
+    Refresh_Music_Status();
+
+    lcd_fill_rect(10, 250, 220, 20, WHITE);
+    lcd_display_string(20, 250, (uint8_t*)"USB Exit", FONT_1206, BLACK);
+
+    usb_msc_mode = 0;
+    return 1;
+}
 void HAL_DAC_ConvHalfCpltCallbackCh1(DAC_HandleTypeDef *hdac)
 {
     audio_half_req = 1;
@@ -449,8 +558,11 @@ int main(void)
   MX_FATFS_Init();
   MX_DAC_Init();
   MX_TIM6_Init();
+//  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
     FRESULT res;
+    UINT bytesRead;
+    char buffer[128];
     HAL_StatusTypeDef hsd_res;
 
     sd_ready = 0;
@@ -549,7 +661,10 @@ int main(void)
 
     while (1)
     {
-        Audio_Service();
+    	if (!usb_msc_mode)
+    	{
+    	    Audio_Service();
+    	}
 
         /* --- XU LY HET BAI TU DONG --- */
         if (audio_finished)
@@ -642,48 +757,55 @@ int main(void)
                   {
                       if (raw_y >= 1900)   /* PLAY */
                       {
-                          if (audio_state == AUDIO_STOPPED)
-                          {
-                              /* Bat dau tu dau */
-                              lcd_fill_rect(15, 185, 200, 25, WHITE);
-                              if (Audio_Start())
-                              {
-                                  lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
-                              }
-                          }
-                          else if (audio_state == AUDIO_PAUSED)
-                          {
-                              /* Bấm Play khi đang Pause -> Chạy lại từ đầu thay vì chạy tiếp */
-                              Audio_Reset(); // Dừng hẳn và reset vị trí file
+                    	  if (usb_msc_mode)
+                    	      {
+                    	          lcd_fill_rect(15, 185, 200, 25, WHITE);
+                    	          lcd_display_string(20, 190, (uint8_t *)"Thoat USB MODE truoc", FONT_1206, RED);
+                    	      }
+                    	      else
+                    	      {
+                    	          if (audio_state != AUDIO_STOPPED)
+                    	          {
+                    	              Audio_Reset();
+                    	          }
 
-                              lcd_fill_rect(15, 185, 200, 25, WHITE);
-                              if (Audio_Start()) // Gọi lại hàm bắt đầu đọc file từ đầu
-                              {
-                                  lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
-                              }
-                          }
-                          HAL_Delay(300);
+                    	          lcd_fill_rect(15, 185, 200, 25, WHITE);
+                    	          if (Audio_Start())
+                    	          {
+                    	              lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
+                    	          }
+                    	      }
+                    	      HAL_Delay(300);
                       }
                       else                  /* PAUSE */
                       {
-                          if (audio_state == AUDIO_PLAYING)
-                          {
-                              /* Pause lan dau: tam dung, giu vi tri */
-                              Audio_Pause();
-                              lcd_fill_rect(15, 185, 200, 25, WHITE);
-                              lcd_display_string(20, 190, (uint8_t *)"Nhac: PAUSED", FONT_1206, BLACK);
-                          }
-                          else if (audio_state == AUDIO_PAUSED)
-                          {
-                              /* Pause lan 2: reset ve dau, lan play sau chay lai tu dau */
-                              Audio_Reset();
-                              lcd_fill_rect(15, 185, 200, 25, WHITE);
-                              lcd_display_string(20, 190, (uint8_t *)"Nhac: STOPPED", FONT_1206, BLACK);
-                              lcd_fill_rect(15, 273, 200, 15, WHITE);
-                              memset(last_time_str, ' ', 13);
-                              last_time_str[13] = '\0';
-                          }
-                          HAL_Delay(300);
+//                          if (audio_state == AUDIO_PLAYING)
+//                          {
+//                              /* Pause lan dau: tam dung, giu vi tri */
+//                              Audio_Pause();
+//                              lcd_fill_rect(15, 185, 200, 25, WHITE);
+//                              lcd_display_string(20, 190, (uint8_t *)"Nhac: PAUSED", FONT_1206, BLACK);
+//                          }
+//                          else if (audio_state == AUDIO_PAUSED)
+//                          {
+//                              /* Pause lan 2: reset ve dau, lan play sau chay lai tu dau */
+//                              Audio_Reset();
+//                              lcd_fill_rect(15, 185, 200, 25, WHITE);
+//                              lcd_display_string(20, 190, (uint8_t *)"Nhac: STOPPED", FONT_1206, BLACK);
+//                              lcd_fill_rect(15, 273, 200, 15, WHITE);
+//                              memset(last_time_str, ' ', 13);
+//                              last_time_str[13] = '\0';
+//                          }
+//                          HAL_Delay(300);
+                    	    if (!usb_msc_mode)
+                    	    {
+                    	        Enter_USB_MSC_Mode();
+                    	    }
+                    	    else
+                    	    {
+                    	        Exit_USB_MSC_Mode();
+                    	    }
+                    	    HAL_Delay(300);
                       }
                   }
               }
@@ -719,7 +841,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLM = 8;
   RCC_OscInitStruct.PLL.PLLN = 336;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -862,7 +984,7 @@ static void MX_SDIO_SD_Init(void)
   hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
   hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
   hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd.Init.ClockDiv = 118;
+  hsd.Init.ClockDiv = 0;
   /* USER CODE BEGIN SDIO_Init 2 */
 
   /* USER CODE END SDIO_Init 2 */
@@ -1056,9 +1178,9 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
