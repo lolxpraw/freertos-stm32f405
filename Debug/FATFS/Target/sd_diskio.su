@@ -1,6 +1,9 @@
-../FATFS/Target/sd_diskio.c:90:16:SD_CheckStatus	16	static
-../FATFS/Target/sd_diskio.c:107:9:SD_initialize	16	static
-../FATFS/Target/sd_diskio.c:130:9:SD_status	16	static
-../FATFS/Target/sd_diskio.c:147:9:SD_read	32	static
-../FATFS/Target/sd_diskio.c:178:9:SD_write	32	static
-../FATFS/Target/sd_diskio.c:208:9:SD_ioctl	56	static
+../FATFS/Target/sd_diskio.c:138:12:SD_CheckStatusWithTimeout	24	static
+../FATFS/Target/sd_diskio.c:159:16:SD_CheckStatus	16	static
+../FATFS/Target/sd_diskio.c:176:9:SD_initialize	16	static
+../FATFS/Target/sd_diskio.c:193:9:SD_status	16	static
+../FATFS/Target/sd_diskio.c:210:9:SD_read	32	static
+../FATFS/Target/sd_diskio.c:246:9:SD_write	32	static
+../FATFS/Target/sd_diskio.c:281:9:SD_ioctl	56	static
+../FATFS/Target/sd_diskio.c:336:6:BSP_SD_WriteCpltCallback	16	static
+../FATFS/Target/sd_diskio.c:356:6:BSP_SD_ReadCpltCallback	16	static

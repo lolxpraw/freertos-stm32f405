@@ -18,8 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "fatfs.h"
-//#include "usb_device.h"
+
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -30,6 +31,7 @@
 #include "touch.h"
 #include "usb_device.h"
 #include "usbd_core.h"
+#include "cmsis_os2.h"
 extern USBD_HandleTypeDef hUsbDeviceHS;
 /* USER CODE END Includes */
 
@@ -49,6 +51,10 @@ extern USBD_HandleTypeDef hUsbDeviceHS;
 #define AUDIO_STOPPED   0
 #define AUDIO_PLAYING   1
 #define AUDIO_PAUSED    2
+
+#define APP_CMD_PLAY       1
+#define APP_CMD_PAUSE      2
+#define APP_CMD_USB_TOGGLE 3
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,6 +78,56 @@ TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for controlTask */
+osThreadId_t controlTaskHandle;
+const osThreadAttr_t controlTask_attributes = {
+  .name = "controlTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for audioTask */
+osThreadId_t audioTaskHandle;
+const osThreadAttr_t audioTask_attributes = {
+  .name = "audioTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for touchTask */
+osThreadId_t touchTaskHandle;
+const osThreadAttr_t touchTask_attributes = {
+  .name = "touchTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for tempTask */
+osThreadId_t tempTaskHandle;
+const osThreadAttr_t tempTask_attributes = {
+  .name = "tempTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for appCmdQueue */
+osMessageQueueId_t appCmdQueueHandle;
+const osMessageQueueAttr_t appCmdQueue_attributes = {
+  .name = "appCmdQueue"
+};
+/* Definitions for spi1Mutex */
+osMutexId_t spi1MutexHandle;
+const osMutexAttr_t spi1Mutex_attributes = {
+  .name = "spi1Mutex"
+};
+/* Definitions for sdMutex */
+osMutexId_t sdMutexHandle;
+const osMutexAttr_t sdMutex_attributes = {
+  .name = "sdMutex"
+};
 /* USER CODE BEGIN PV */
 FIL myFile;
 FIL musicFile;
@@ -119,6 +175,12 @@ static void MX_SDIO_SD_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_DAC_Init(void);
 static void MX_TIM6_Init(void);
+void StartDefaultTask(void *argument);
+void StartTask02(void *argument);
+void StartTask03(void *argument);
+void StartTask04(void *argument);
+void StartTask05(void *argument);
+
 /* USER CODE BEGIN PFP */
 float Read_Temperature(void);
 uint8_t Audio_Start(void);
@@ -128,6 +190,11 @@ void Audio_Reset(void);
 void Audio_Service(void);
 void Audio_FillHalf(uint16_t startIndex);
 void Refresh_Music_Status(void);
+
+
+
+void StartDefaultTask(void *argument);
+
 uint8_t Enter_USB_MSC_Mode(void);
 uint8_t Exit_USB_MSC_Mode(void);
 uint16_t WAV_ReadU16(const uint8_t *p);
@@ -430,6 +497,8 @@ void Refresh_Music_Status(void)
     if (!sd_ready) return;
 
     res = f_open(&musicFile, "music.wav", FA_READ);
+
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
     lcd_fill_rect(20, 230, 200, 20, WHITE);
 
     if (res == FR_OK)
@@ -441,6 +510,7 @@ void Refresh_Music_Status(void)
     {
         lcd_display_string(20, 230, (uint8_t*)"music.wav FAIL", FONT_1206, RED);
     }
+    osMutexRelease(spi1MutexHandle);
 }
 uint8_t Enter_USB_MSC_Mode(void)
 {
@@ -449,24 +519,28 @@ uint8_t Enter_USB_MSC_Mode(void)
     /* Dung hẳn audio, đóng file */
     Audio_Reset();
 
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
     lcd_fill_rect(15, 185, 210, 25, WHITE);
     lcd_display_string(20, 190, (uint8_t*)"USB MODE: START", FONT_1206, BLACK);
 
     /* Xoa dong thoi gian cu */
     lcd_fill_rect(15, 273, 200, 15, WHITE);
+    osMutexRelease(spi1MutexHandle);
 
     /* Unmount SD khoi FatFs */
     f_mount(NULL, SDPath, 1);
-    HAL_Delay(100);
+    osDelay(100);
 
     /* Bat USB MSC */
     MX_USB_DEVICE_Init();
-    HAL_Delay(500);
+    osDelay(500);
 
     usb_msc_mode = 1;
 
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
     lcd_fill_rect(10, 250, 220, 20, WHITE);
     lcd_display_string(20, 250, (uint8_t*)"PC: Copy music.wav", FONT_1206, BLUE);
+    osMutexRelease(spi1MutexHandle);
 
     return 1;
 }
@@ -476,35 +550,46 @@ uint8_t Exit_USB_MSC_Mode(void)
 
     if (!usb_msc_mode) return 1;
 
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
     lcd_fill_rect(15, 185, 210, 25, WHITE);
     lcd_display_string(20, 190, (uint8_t*)"USB MODE: STOP", FONT_1206, BLACK);
+    osMutexRelease(spi1MutexHandle);
 
     /* Tat USB */
     USBD_Stop(&hUsbDeviceHS);
     USBD_DeInit(&hUsbDeviceHS);
-    HAL_Delay(300);
+    osDelay(300);
 
     /* Mount lai SD */
     res = f_mount(&SDFatFS, SDPath, 1);
     if (res == FR_OK)
     {
         sd_ready = 1;
+
+        osMutexAcquire(spi1MutexHandle, osWaitForever);
         lcd_fill_rect(20, 210, 200, 20, WHITE);
         lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
+        osMutexRelease(spi1MutexHandle);
     }
     else
     {
         sd_ready = 0;
+
+        osMutexAcquire(spi1MutexHandle, osWaitForever);
         lcd_fill_rect(20, 210, 200, 20, WHITE);
         lcd_display_string(20, 210, (uint8_t*)"Mount FAIL", FONT_1206, RED);
+        osMutexRelease(spi1MutexHandle);
+
         usb_msc_mode = 0;
         return 0;
     }
 
     Refresh_Music_Status();
 
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
     lcd_fill_rect(10, 250, 220, 20, WHITE);
     lcd_display_string(20, 250, (uint8_t*)"USB Exit", FONT_1206, BLACK);
+    osMutexRelease(spi1MutexHandle);
 
     usb_msc_mode = 0;
     return 1;
@@ -518,6 +603,7 @@ void HAL_DAC_ConvCpltCallbackCh1(DAC_HandleTypeDef *hdac)
 {
     audio_full_req = 1;
 }
+
 /* USER CODE END 0 */
 
 /**
@@ -558,13 +644,7 @@ int main(void)
   MX_FATFS_Init();
   MX_DAC_Init();
   MX_TIM6_Init();
-//  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-    FRESULT res;
-    UINT bytesRead;
-    char buffer[128];
-    HAL_StatusTypeDef hsd_res;
-
     sd_ready = 0;
 
     lcd_init();
@@ -594,222 +674,80 @@ int main(void)
 
     /* UI da ve xong -> bat backlight. */
     LCD_BKL_H();
-
-    /* Khoi tao SD */
-    hsd_res = HAL_SD_Init(&hsd);
-    if (hsd_res != HAL_OK)
-    {
-        lcd_display_string(20, 210, (uint8_t*)"HAL_SD_Init FAIL", FONT_1206, RED);
-    }
-    else
-    {
-        /* chuyen tu 1-bit sang 4-bit */
-        hsd_res = HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B);
-
-        if (hsd_res != HAL_OK)
-        {
-            lcd_display_string(20, 210, (uint8_t*)"4-bit config FAIL", FONT_1206, RED);
-        }
-        else
-        {
-            HAL_Delay(20);
-            res = f_mount(&SDFatFS, SDPath, 1);
-
-            if (res == FR_OK)
-            {
-                sd_ready = 1;
-                lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
-
-                /* ĐÃ XÓA PHẦN ĐỌC FILE test.txt Ở ĐÂY */
-
-                /* kiem tra co music.wav khong (Đẩy tọa độ Y từ 250 lên 230) */
-                res = f_open(&musicFile, "music.wav", FA_READ);
-                if (res == FR_OK)
-                {
-                    f_close(&musicFile);
-                    lcd_fill_rect(20, 230, 200, 20, WHITE);
-                    lcd_display_string(20, 230, (uint8_t*)"music.wav READY", FONT_1206, GREEN);
-                }
-                else
-                {
-                    lcd_fill_rect(20, 230, 200, 20, WHITE);
-                    lcd_display_string(20, 230, (uint8_t*)"music.wav FAIL", FONT_1206, RED);
-                }
-            }
-            else
-            {
-                char msg[32];
-                sprintf(msg, "Mount FAIL: %d", res);
-                lcd_display_string(20, 210, (uint8_t*)msg, FONT_1206, RED);
-            }
-        }
-    }
-
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)Adc.Raw, 2);
-    HAL_TIM_Base_Start(&htim3);
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+  /* Create the mutex(es) */
+  /* creation of spi1Mutex */
+  spi1MutexHandle = osMutexNew(&spi1Mutex_attributes);
+
+  /* creation of sdMutex */
+  sdMutexHandle = osMutexNew(&sdMutex_attributes);
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* Create the queue(s) */
+  /* creation of appCmdQueue */
+  appCmdQueueHandle = osMessageQueueNew (8, 4, &appCmdQueue_attributes);
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* creation of controlTask */
+  controlTaskHandle = osThreadNew(StartTask02, NULL, &controlTask_attributes);
+
+  /* creation of audioTask */
+  audioTaskHandle = osThreadNew(StartTask03, NULL, &audioTask_attributes);
+
+  /* creation of touchTask */
+  touchTaskHandle = osThreadNew(StartTask04, NULL, &touchTask_attributes);
+
+  /* creation of tempTask */
+  tempTaskHandle = osThreadNew(StartTask05, NULL, &tempTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-    uint32_t last_temp_update = 0;
-    uint32_t last_time_update = 0;
-    char last_time_str[24] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
-    char last_temp_str[16] = "       ";         /* 7 spaces:  "XX.XX C" */
+//    uint32_t last_temp_update = 0;
+//    uint32_t last_time_update = 0;
+//    char last_time_str[24] = "             ";   /* 13 spaces: "MM:SS / MM:SS" */
+//    char last_temp_str[16] = "       ";         /* 7 spaces:  "XX.XX C" */
+//
+//    const int CHAR_W = 6;   /* FONT_1206: rong 6, cao 12 */
+//    const int CHAR_H = 12;
 
-    const int CHAR_W = 6;   /* FONT_1206: rong 6, cao 12 */
-    const int CHAR_H = 12;
-
-    while (1)
-    {
-    	if (!usb_msc_mode)
-    	{
-    	    Audio_Service();
-    	}
-
-        /* --- XU LY HET BAI TU DONG --- */
-        if (audio_finished)
+        while (1)
         {
-            audio_finished = 0;
-            lcd_fill_rect(15, 185, 200, 25, WHITE);
-            lcd_display_string(20, 190, (uint8_t *)"Nhac: HET BAI", FONT_1206, BLACK);
-            lcd_fill_rect(15, 273, 200, 15, WHITE);
-            memset(last_time_str, ' ', 13);
-            last_time_str[13] = '\0';
         }
 
-        /* --- HIEN THI THOI GIAN BAI NHAC --- */
-        if (audio_state == AUDIO_PLAYING && audio_total_samples > 0 &&
-            HAL_GetTick() - last_time_update > 200)
-        {
-            last_time_update = HAL_GetTick();
-
-            uint32_t played = audio_played_samples;
-            uint32_t total  = audio_total_samples;
-            if (played > total) played = total;
-            uint32_t cur_s = played / AUDIO_SAMPLE_RATE;
-            uint32_t tot_s = total / AUDIO_SAMPLE_RATE;
-
-            char new_time_str[24];
-            snprintf(new_time_str, sizeof(new_time_str), "%02lu:%02lu / %02lu:%02lu",
-                     (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
-                     (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
-
-            const int T_X = 20;
-            const int T_Y = 275;
-
-            for (int i = 0; new_time_str[i] != '\0' && i < 15; i++)
-            {
-                if (last_time_str[i] != new_time_str[i])
-                {
-                    lcd_fill_rect(T_X + i * CHAR_W, T_Y, CHAR_W, CHAR_H, WHITE);
-                    char tmp[2] = { new_time_str[i], '\0' };
-                    lcd_display_string(T_X + i * CHAR_W, T_Y,
-                                       (uint8_t *)tmp, FONT_1206, BLACK);
-                }
-            }
-            strcpy(last_time_str, new_time_str);
-        }
-
-        /* --- CAP NHAT NHIET DO --- */
-        if (Flg.ADCCMPLT)
-        {
-            if (HAL_GetTick() - last_temp_update > ((audio_state == AUDIO_PLAYING) ? 2000 : 1000))
-            {
-                int temp_int, temp_frac;
-
-                Adc.IntSensTmp = TMPSENSOR_getTemperature(Adc.Raw[1], Adc.Raw[0]);
-                temp_int = (int)Adc.IntSensTmp;
-                temp_frac = (int)((Adc.IntSensTmp - temp_int) * 100.0f);
-                if (temp_frac < 0) temp_frac = -temp_frac;
-
-                char new_temp_str[16];
-                sprintf(new_temp_str, "%2d.%02d C", temp_int, temp_frac);
-
-                const int TMP_X = 155;
-                const int TMP_Y = 64;
-
-                for (int i = 0; new_temp_str[i] != '\0' && i < 15; i++)
-                {
-                    if (last_temp_str[i] != new_temp_str[i])
-                    {
-                        lcd_fill_rect(TMP_X + i * CHAR_W, TMP_Y, CHAR_W, CHAR_H, WHITE);
-                        char tmp[2] = { new_temp_str[i], '\0' };
-                        lcd_display_string(TMP_X + i * CHAR_W, TMP_Y,
-                                           (uint8_t *)tmp, FONT_1206, BLACK);
-                    }
-                }
-                strcpy(last_temp_str, new_temp_str);
-
-                last_temp_update = HAL_GetTick();
-            }
-            Flg.ADCCMPLT = 0;
-        }
-
-        /* --- XU LY CAM UNG --- */
-        /* --- XU LY CAM UNG --- */
-              uint16_t raw_x = 0;
-              uint16_t raw_y = 0;
-
-              if (Get_Touch_XY(&raw_x, &raw_y))
-              {
-                  /* Khung nut Play/Pause */
-                  if (raw_x >= 1900 && raw_x <= 2700 && raw_y >= 1000 && raw_y <= 2900)
-                  {
-                      if (raw_y >= 1900)   /* PLAY */
-                      {
-                    	  if (usb_msc_mode)
-                    	      {
-                    	          lcd_fill_rect(15, 185, 200, 25, WHITE);
-                    	          lcd_display_string(20, 190, (uint8_t *)"Thoat USB MODE truoc", FONT_1206, RED);
-                    	      }
-                    	      else
-                    	      {
-                    	          if (audio_state != AUDIO_STOPPED)
-                    	          {
-                    	              Audio_Reset();
-                    	          }
-
-                    	          lcd_fill_rect(15, 185, 200, 25, WHITE);
-                    	          if (Audio_Start())
-                    	          {
-                    	              lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
-                    	          }
-                    	      }
-                    	      HAL_Delay(300);
-                      }
-                      else                  /* PAUSE */
-                      {
-//                          if (audio_state == AUDIO_PLAYING)
-//                          {
-//                              /* Pause lan dau: tam dung, giu vi tri */
-//                              Audio_Pause();
-//                              lcd_fill_rect(15, 185, 200, 25, WHITE);
-//                              lcd_display_string(20, 190, (uint8_t *)"Nhac: PAUSED", FONT_1206, BLACK);
-//                          }
-//                          else if (audio_state == AUDIO_PAUSED)
-//                          {
-//                              /* Pause lan 2: reset ve dau, lan play sau chay lai tu dau */
-//                              Audio_Reset();
-//                              lcd_fill_rect(15, 185, 200, 25, WHITE);
-//                              lcd_display_string(20, 190, (uint8_t *)"Nhac: STOPPED", FONT_1206, BLACK);
-//                              lcd_fill_rect(15, 273, 200, 15, WHITE);
-//                              memset(last_time_str, ' ', 13);
-//                              last_time_str[13] = '\0';
-//                          }
-//                          HAL_Delay(300);
-                    	    if (!usb_msc_mode)
-                    	    {
-                    	        Enter_USB_MSC_Mode();
-                    	    }
-                    	    else
-                    	    {
-                    	        Exit_USB_MSC_Mode();
-                    	    }
-                    	    HAL_Delay(300);
-                      }
-                  }
-              }
-    }
 
     /* USER CODE END WHILE */
 
@@ -984,7 +922,7 @@ static void MX_SDIO_SD_Init(void)
   hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
   hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
   hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd.Init.ClockDiv = 0;
+  hsd.Init.ClockDiv = 10;
   /* USER CODE BEGIN SDIO_Init 2 */
 
   /* USER CODE END SDIO_Init 2 */
@@ -1157,10 +1095,10 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Stream5_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
@@ -1243,10 +1181,296 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 //Khang's code end
 /* USER CODE END 4 */
 
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  FRESULT res;
+
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)Adc.Raw, 2);
+  HAL_TIM_Base_Start(&htim3);
+
+  osDelay(200);
+
+  osMutexAcquire(spi1MutexHandle, osWaitForever);
+  lcd_fill_rect(20, 210, 200, 20, WHITE);
+  lcd_display_string(20, 210, (uint8_t*)"Init SD...", FONT_1206, BLACK);
+  osMutexRelease(spi1MutexHandle);
+
+  osMutexAcquire(sdMutexHandle, osWaitForever);
+  res = f_mount(&SDFatFS, SDPath, 1);
+  osMutexRelease(sdMutexHandle);
+
+  if (res == FR_OK)
+  {
+    sd_ready = 1;
+
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
+    lcd_fill_rect(20, 210, 200, 20, WHITE);
+    lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
+    osMutexRelease(spi1MutexHandle);
+
+    Refresh_Music_Status();
+  }
+  else
+  {
+    sd_ready = 0;
+
+    char msg[32];
+    sprintf(msg, "Mount FAIL: %d", res);
+
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
+    lcd_fill_rect(20, 210, 200, 20, WHITE);
+    lcd_display_string(20, 210, (uint8_t*)msg, FONT_1206, RED);
+    osMutexRelease(spi1MutexHandle);
+  }
+
+  for(;;)
+  {
+    osDelay(1000);
+  }
+}
+
+/* USER CODE BEGIN Header_StartTask02 */
+/**
+* @brief Function implementing the controlTask thread.
+* @param argument: Not used
+* @retval None
+*/
+void StartTask02(void *argument)
+{
+	uint32_t cmd;
+
+  for(;;)
+  {
+    if (osMessageQueueGet(appCmdQueueHandle, &cmd, NULL, 10) == osOK)
+    {
+      switch (cmd)
+      {
+        case APP_CMD_PLAY:
+          if (usb_msc_mode)
+          {
+            osMutexAcquire(spi1MutexHandle, osWaitForever);
+            lcd_fill_rect(15, 185, 200, 25, WHITE);
+            lcd_display_string(20, 190, (uint8_t *)"Thoat USB MODE truoc", FONT_1206, RED);
+            osMutexRelease(spi1MutexHandle);
+          }
+          else
+          {
+            osMutexAcquire(sdMutexHandle, osWaitForever);
+
+            if (audio_state != AUDIO_STOPPED)
+            {
+              Audio_Reset();
+            }
+
+            if (Audio_Start())
+            {
+              osMutexAcquire(spi1MutexHandle, osWaitForever);
+              lcd_fill_rect(15, 185, 200, 25, WHITE);
+              lcd_display_string(20, 190, (uint8_t *)"Nhac: PLAYING...", FONT_1206, BLACK);
+              osMutexRelease(spi1MutexHandle);
+            }
+
+            osMutexRelease(sdMutexHandle);
+          }
+          break;
+
+        case APP_CMD_PAUSE:
+          osMutexAcquire(sdMutexHandle, osWaitForever);
+
+          if (!usb_msc_mode)
+          {
+            Enter_USB_MSC_Mode();
+          }
+          else
+          {
+            Exit_USB_MSC_Mode();
+          }
+
+          osMutexRelease(sdMutexHandle);
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    osDelay(10);
+  }
+}
+/* USER CODE END Header_StartTask02 */
+
+
+/* USER CODE BEGIN Header_StartTask03 */
+/**
+* @brief Function implementing the audioTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask03 */
+void StartTask03(void *argument)
+{
+  uint32_t last_time_update = 0;
+  char last_time_str[24] = "             ";
+  const int CHAR_W = 6;
+  const int CHAR_H = 12;
+
+  for(;;)
+  {
+    if (!usb_msc_mode)
+    {
+      osMutexAcquire(sdMutexHandle, osWaitForever);
+      Audio_Service();
+      osMutexRelease(sdMutexHandle);
+    }
+
+    if (audio_finished)
+    {
+      audio_finished = 0;
+
+      osMutexAcquire(spi1MutexHandle, osWaitForever);
+      lcd_fill_rect(15, 185, 200, 25, WHITE);
+      lcd_display_string(20, 190, (uint8_t *)"Nhac: HET BAI", FONT_1206, BLACK);
+      lcd_fill_rect(15, 273, 200, 15, WHITE);
+      osMutexRelease(spi1MutexHandle);
+
+      memset(last_time_str, ' ', 13);
+      last_time_str[13] = '\0';
+    }
+
+    if (audio_state == AUDIO_PLAYING && audio_total_samples > 0 &&
+        HAL_GetTick() - last_time_update > 200)
+    {
+      last_time_update = HAL_GetTick();
+
+      uint32_t played = audio_played_samples;
+      uint32_t total  = audio_total_samples;
+      if (played > total) played = total;
+
+      uint32_t cur_s = played / AUDIO_SAMPLE_RATE;
+      uint32_t tot_s = total / AUDIO_SAMPLE_RATE;
+
+      char new_time_str[24];
+      snprintf(new_time_str, sizeof(new_time_str), "%02lu:%02lu / %02lu:%02lu",
+               (unsigned long)(cur_s / 60), (unsigned long)(cur_s % 60),
+               (unsigned long)(tot_s / 60), (unsigned long)(tot_s % 60));
+
+      const int T_X = 20;
+      const int T_Y = 275;
+
+      osMutexAcquire(spi1MutexHandle, osWaitForever);
+      for (int i = 0; new_time_str[i] != '\0' && i < 15; i++)
+      {
+        if (last_time_str[i] != new_time_str[i])
+        {
+          lcd_fill_rect(T_X + i * CHAR_W, T_Y, CHAR_W, CHAR_H, WHITE);
+          char tmp[2] = { new_time_str[i], '\0' };
+          lcd_display_string(T_X + i * CHAR_W, T_Y, (uint8_t *)tmp, FONT_1206, BLACK);
+        }
+      }
+      osMutexRelease(spi1MutexHandle);
+
+      strcpy(last_time_str, new_time_str);
+    }
+
+    osDelay(10);
+  }
+}
+/* USER CODE BEGIN Header_StartTask04 */
+/**
+* @brief Function implementing the touchTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask04 */
+void StartTask04(void *argument)
+{
+  uint16_t raw_x = 0, raw_y = 0;
+  uint32_t cmd;
+
+  for(;;)
+  {
+    osMutexAcquire(spi1MutexHandle, osWaitForever);
+    uint8_t touched = Get_Touch_XY(&raw_x, &raw_y);
+    osMutexRelease(spi1MutexHandle);
+
+    if (touched)
+    {
+      if (raw_x >= 1900 && raw_x <= 2700 && raw_y >= 1000 && raw_y <= 2900)
+      {
+        if (raw_y >= 1900)
+          cmd = APP_CMD_PLAY;
+        else
+          cmd = APP_CMD_PAUSE;
+
+        osMessageQueuePut(appCmdQueueHandle, &cmd, 0, 0);
+        osDelay(300);
+      }
+    }
+
+    osDelay(20);
+  }
+}
+void StartTask05(void *argument)
+{
+  uint32_t last_temp_update = 0;
+  char last_temp_str[16] = "       ";
+  const int CHAR_W = 6;
+  const int CHAR_H = 12;
+
+  for(;;)
+  {
+    if (Flg.ADCCMPLT)
+    {
+      if (HAL_GetTick() - last_temp_update > ((audio_state == AUDIO_PLAYING) ? 2000 : 1000))
+      {
+        int temp_int, temp_frac;
+
+        Adc.IntSensTmp = TMPSENSOR_getTemperature(Adc.Raw[1], Adc.Raw[0]);
+        temp_int = (int)Adc.IntSensTmp;
+        temp_frac = (int)((Adc.IntSensTmp - temp_int) * 100.0f);
+        if (temp_frac < 0) temp_frac = -temp_frac;
+
+        char new_temp_str[16];
+        sprintf(new_temp_str, "%2d.%02d C", temp_int, temp_frac);
+
+        const int TMP_X = 155;
+        const int TMP_Y = 64;
+
+        osMutexAcquire(spi1MutexHandle, osWaitForever);
+        for (int i = 0; new_temp_str[i] != '\0' && i < 15; i++)
+        {
+          if (last_temp_str[i] != new_temp_str[i])
+          {
+            lcd_fill_rect(TMP_X + i * CHAR_W, TMP_Y, CHAR_W, CHAR_H, WHITE);
+            char tmp[2] = { new_temp_str[i], '\0' };
+            lcd_display_string(TMP_X + i * CHAR_W, TMP_Y, (uint8_t *)tmp, FONT_1206, BLACK);
+          }
+        }
+        osMutexRelease(spi1MutexHandle);
+
+        strcpy(last_temp_str, new_temp_str);
+        last_temp_update = HAL_GetTick();
+      }
+
+      Flg.ADCCMPLT = 0;
+    }
+
+    osDelay(50);
+  }
+}
+
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
   */
+
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */

@@ -21,7 +21,9 @@
 /* Includes ------------------------------------------------------------------*/
 #include "usbd_storage_if.h"
 #include "main.h"
+
 extern SD_HandleTypeDef hsd;
+
 /* USER CODE BEGIN INCLUDE */
 
 /* USER CODE END INCLUDE */
@@ -194,7 +196,7 @@ int8_t STORAGE_Init_HS(uint8_t lun)
   */
 int8_t STORAGE_GetCapacity_HS(uint8_t lun, uint32_t *block_num, uint16_t *block_size)
 {
-	  /* USER CODE BEGIN 10 */
+  /* USER CODE BEGIN 10 */
 	  HAL_SD_CardInfoTypeDef cardInfo;
 	  UNUSED(lun);
 
@@ -204,7 +206,7 @@ int8_t STORAGE_GetCapacity_HS(uint8_t lun, uint32_t *block_num, uint16_t *block_
 	  *block_size = cardInfo.LogBlockSize;
 
 	  return (USBD_OK);
-	  /* USER CODE END 10 */
+  /* USER CODE END 10 */
 }
 
 /**
@@ -214,14 +216,14 @@ int8_t STORAGE_GetCapacity_HS(uint8_t lun, uint32_t *block_num, uint16_t *block_
   */
 int8_t STORAGE_IsReady_HS(uint8_t lun)
 {
-	  /* USER CODE BEGIN 11 */
+  /* USER CODE BEGIN 11 */
 	  UNUSED(lun);
 
 	  if (HAL_SD_GetCardState(&hsd) == HAL_SD_CARD_TRANSFER)
 	    return USBD_OK;
 
 	  return USBD_BUSY;
-	  /* USER CODE END 11 */
+  /* USER CODE END 11 */
 }
 
 /**
@@ -246,7 +248,7 @@ int8_t STORAGE_IsWriteProtected_HS(uint8_t lun)
   */
 int8_t STORAGE_Read_HS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t blk_len)
 {
-	  /* USER CODE BEGIN 13 */
+  /* USER CODE BEGIN 13 */
 	  UNUSED(lun);
 
 	  if (HAL_SD_ReadBlocks(&hsd, buf, blk_addr, blk_len, HAL_MAX_DELAY) != HAL_OK)
@@ -257,7 +259,7 @@ int8_t STORAGE_Read_HS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t bl
 	  }
 
 	  return (USBD_OK);
-	  /* USER CODE END 13 */
+  /* USER CODE END 13 */
 }
 
 /**
@@ -270,7 +272,7 @@ int8_t STORAGE_Read_HS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t bl
   */
 int8_t STORAGE_Write_HS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t blk_len)
 {
-	  /* USER CODE BEGIN 14 */
+  /* USER CODE BEGIN 14 */
 	  UNUSED(lun);
 
 	  if (HAL_SD_WriteBlocks(&hsd, buf, blk_addr, blk_len, HAL_MAX_DELAY) != HAL_OK)
@@ -281,7 +283,7 @@ int8_t STORAGE_Write_HS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t b
 	  }
 
 	  return (USBD_OK);
-	  /* USER CODE END 14 */
+  /* USER CODE END 14 */
 }
 
 /**
