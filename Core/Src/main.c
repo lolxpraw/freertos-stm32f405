@@ -504,7 +504,7 @@ void Refresh_Music_Status(void)
     if (res == FR_OK)
     {
         f_close(&musicFile);
-        lcd_display_string(20, 230, (uint8_t*)"music.wav READY", FONT_1206, GREEN);
+        lcd_display_string(20, 230, (uint8_t*)"music.wav READY", FONT_1206, BLACK);
     }
     else
     {
@@ -568,7 +568,7 @@ uint8_t Exit_USB_MSC_Mode(void)
 
         osMutexAcquire(spi1MutexHandle, osWaitForever);
         lcd_fill_rect(20, 210, 200, 20, WHITE);
-        lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
+        lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, BLACK);
         osMutexRelease(spi1MutexHandle);
     }
     else
@@ -1212,7 +1212,7 @@ void StartDefaultTask(void *argument)
 
     osMutexAcquire(spi1MutexHandle, osWaitForever);
     lcd_fill_rect(20, 210, 200, 20, WHITE);
-    lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, GREEN);
+    lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, BLACK);
     osMutexRelease(spi1MutexHandle);
 
     Refresh_Music_Status();
