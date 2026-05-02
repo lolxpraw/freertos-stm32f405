@@ -1215,7 +1215,11 @@ void StartDefaultTask(void *argument)
     lcd_display_string(20, 210, (uint8_t*)"SD OK", FONT_1206, BLACK);
     osMutexRelease(spi1MutexHandle);
 
+    /* Refresh_Music_Status mo/dong file -> can sdMutex de tranh race
+     * voi controlTask/audioTask vua moi duoc start */
+    osMutexAcquire(sdMutexHandle, osWaitForever);
     Refresh_Music_Status();
+    osMutexRelease(sdMutexHandle);
   }
   else
   {
