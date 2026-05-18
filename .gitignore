@@ -1,0 +1,26 @@
+# Build output
+Debug/
+Release/
+build/
+
+# Object / binary files
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.su
+*.cyclo
+
+# STM32CubeIDE / Eclipse local settings
+.metadata/
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp

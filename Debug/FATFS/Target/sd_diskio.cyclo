@@ -1,9 +1,0 @@
-../FATFS/Target/sd_diskio.c:138:12:SD_CheckStatusWithTimeout	3
-../FATFS/Target/sd_diskio.c:159:16:SD_CheckStatus	2
-../FATFS/Target/sd_diskio.c:176:9:SD_initialize	2
-../FATFS/Target/sd_diskio.c:193:9:SD_status	1
-../FATFS/Target/sd_diskio.c:210:9:SD_read	5
-../FATFS/Target/sd_diskio.c:246:9:SD_write	5
-../FATFS/Target/sd_diskio.c:281:9:SD_ioctl	6
-../FATFS/Target/sd_diskio.c:336:6:BSP_SD_WriteCpltCallback	1
-../FATFS/Target/sd_diskio.c:356:6:BSP_SD_ReadCpltCallback	1
