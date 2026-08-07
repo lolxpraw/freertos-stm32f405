@@ -120,8 +120,6 @@ Typical flow:
 ## How to Build
 
 1. Install **STM32CubeIDE**.
-2. Clone this repository:
-
 ```bash
 git clone https://github.com/lolxpraw/freertos-stm32f405.git
 ```
@@ -152,6 +150,10 @@ This project demonstrates:
 - Timer-triggered ADC and DAC operation.
 - Touch-screen based embedded user interface.
 - USB Mass Storage integration on STM32.
+
+## Demo
+
+https://github.com/user-attachments/assets/ccf996e0-c88e-4a05-88fe-169f24f48223
 
 ## Notes
 
