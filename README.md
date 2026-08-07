@@ -58,6 +58,11 @@ Synchronization objects:
 - `spi1Mutex`: protects LCD/touch access over SPI.
 - `sdMutex`: protects SD/FATFS and audio file access.
 
+## Block diagram
+
+<img width="7112" height="8192" alt="block_diagram_rtos" src="https://github.com/user-attachments/assets/b1d0e456-543e-4269-b94c-1ce15516c329" />
+
+
 ## Audio File Requirement
 
 The firmware expects the audio file to be named:
