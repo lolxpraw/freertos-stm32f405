@@ -166,6 +166,3 @@ https://github.com/user-attachments/assets/ccf996e0-c88e-4a05-88fe-169f24f48223
 - The audio playback implementation is designed for 8-bit mono 16 kHz WAV files.
 - Hardware pin mapping and peripheral configuration can be reviewed or modified through `project.ioc` in STM32CubeIDE.
 
-## Author
-
-Developed as an embedded systems / real-time operating system project using STM32F4 and FreeRTOS.
